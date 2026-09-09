@@ -1,0 +1,11 @@
+streamlit==1.63.0
+pandas==3.0.5
+SQLAlchemy==2.0.52
+psycopg2-binary==2.9.12
+PyYAML==6.0.3
+python-dotenv==1.2.3
+pydantic==2.13.5
+openpyxl==3.1.5
+openai==3.11.0
+requests==2.34.2
+pytest==9.1.1

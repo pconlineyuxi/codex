@@ -1,0 +1,82 @@
+report_name: product_profit_bi
+source_table: bi.ba_mv_profit_order_line_and_ad_info
+required_filters:
+  - start_date
+  - end_date
+  - has_product_cost
+  - has_sale_price
+filters:
+  has_product_cost:
+    sql_field: has_product_cost
+    operator: in
+    type: bool_list
+    default: [true]
+  has_sale_price:
+    sql_field: has_sale_price
+    operator: in
+    type: bool_list
+    default: [true]
+  category_exclude:
+    sql_field: category
+    operator: not_in
+    type: string_list_with_null
+    default: [BOM, Services, Used, New, Computer Accessories, Warranty]
+  ir_exclude:
+    sql_field: ir
+    operator: not_in
+    type: string_list
+    default: [SHIPPING FEE, SHIPMENT DISCOUNT, GIFT WRAPPER FEE, PROMOTION DISCOUNT]
+  store:
+    sql_field: store
+    operator: in
+    type: string_list
+  marketplace:
+    sql_field: market_place
+    operator: in
+    type: string_list
+  main_ir:
+    sql_field: main_ir
+    operator: in
+    type: string_list
+  category:
+    sql_field: category
+    operator: in
+    type: string_list_with_null
+    note: Confirm BI include/exclude semantics before enabling by default.
+  follower:
+    sql_field: follower
+    operator: in
+    type: string_list
+  brand:
+    sql_field: brand
+    operator: in
+    type: string_list
+  sku:
+    sql_field: sku
+    operator: in
+    type: string_list
+  ir:
+    sql_field: ir
+    operator: in
+    type: string_list
+  order_id:
+    sql_field: order_name
+    operator: in
+    type: string_list
+  attribute_use_for:
+    sql_field: attribute_use_for
+    operator: in
+    type: string_list
+  attribute_screen_size:
+    sql_field: attribute_screen_size
+    operator: in
+    type: string_list
+  attribute_touch:
+    sql_field: attribute_touch
+    operator: in
+    type: string_list
+  attribute_processor_series:
+    sql_field: attribute_processor_series
+    operator: in
+    type: string_list
+unsupported_filters: {}

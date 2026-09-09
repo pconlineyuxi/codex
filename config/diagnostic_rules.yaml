@@ -1,0 +1,112 @@
+tolerances:
+  amount_abs: 1.0
+  amount_pct: 0.005
+  rate_abs: 0.001
+  units_abs: 0.0
+thresholds:
+  shipping_cost_ratio_high: 0.50
+  unit_shipping_fee_high: 80.0
+  promotion_ratio_high: 0.50
+  ad_spend_ratio_high: 0.10
+  profit_rate_with_ads_ship_high: 1.0
+  max_query_days: 180
+  max_result_rows: 50000
+queryable_rules:
+  zero_units_with_sales:
+    severity: P0
+    level: line
+    description: Units = 0 but Sales is not 0.
+  zero_sales_with_units:
+    severity: P0
+    level: line
+    description: Sales = 0 but Units is not 0.
+  negative_units:
+    severity: P0
+    level: line
+    description: Units is negative.
+  negative_sales:
+    severity: P0
+    level: line
+    description: Sales is negative.
+  negative_shipping_fee:
+    severity: P1
+    level: line
+    description: Shipping fee is negative.
+  negative_promotion:
+    severity: P1
+    level: line
+    description: Promotion is negative after dashboard sign normalization.
+  negative_commission:
+    severity: P1
+    level: line
+    description: Commission is negative.
+  negative_ad_spend:
+    severity: P1
+    level: aggregate
+    description: Ad spend is negative.
+  missing_product_cost:
+    severity: P0
+    level: line
+    description: Product cost per unit is null or non-positive while cost should exist.
+  unit_cost_non_positive:
+    severity: P0
+    level: line
+    description: product_cost_unit + hardware_cost - removed_hardware <= 0.
+  removed_hardware_abnormal:
+    severity: P1
+    level: line
+    description: removed_hardware is greater than product_cost_unit + hardware_cost.
+  shipping_cost_ratio_high:
+    severity: P1
+    level: line
+    description: shipping_fee / sales exceeds configured threshold.
+  unit_shipping_fee_high:
+    severity: P1
+    level: line
+    description: shipping_fee / units exceeds configured threshold.
+  promotion_ratio_high:
+    severity: P1
+    level: line
+    description: promo_cost / sales exceeds configured threshold.
+  ad_spend_ratio_high:
+    severity: P1
+    level: aggregate
+    description: ad_spend / sales exceeds configured threshold.
+  ad_spend_without_sales:
+    severity: P1
+    level: aggregate
+    description: ad_spend > 0 while sales = 0.
+  profit_rate_with_ads_ship_high:
+    severity: P1
+    level: aggregate
+    description: profit rate with Ads & Ship > 1.
+normal_business_cases:
+  bundle_accessory_cost_allocation:
+    description: Bundle accessory sales/commission/shipping/promotion can be adjusted to make accessory profit close to zero; do not treat near-zero accessory profit or zero accessory shipping/promotion as anomaly by itself.
+  amazon_only_promotion_coverage:
+    description: Promotion is currently mainly available from Amazon; non-Amazon zero promotion is not a missing-data anomaly by itself.
+  bundle_promotion_allocation:
+    description: Bundle promotion is allocated to main product; accessory promotion can be 0 normally.
+  bundle_shipping_allocation:
+    description: Bundle shipping fee is allocated to main product; accessory shipping can be 0 normally.
+  v3_3_ad_ir_placeholder:
+    description: V3.3 ad spend may use product_v3_3 as placeholder IR because SKU-level ad data cannot map to configuration IR.
+  newegg_ad_start_date:
+    effective_start_date: '2025-03-19'
+    description: Newegg ad data starts from 2025-03-19; earlier zero ad spend should not be treated as missing ad data.
+  ef_estimated_shipping_start_date:
+    effective_start_date: '2025-03-13'
+    description: EF estimated shipping cost starts from 2025-03-13.
+  amazon_estimated_shipping_start_date:
+    effective_start_date: '2025-08-06'
+    description: Amazon estimated shipping cost starts from 2025-08-06.
+rule_guards:
+  promotion_ratio_high:
+    skip_when_marketplace_not_in: [Amazon, Amazon US, Amazon CA, Amazon USA, Amazon USA(Renew)]
+    guard_note: Promotion coverage is mainly Amazon; non-Amazon promotion anomalies are downgraded unless explicitly requested.
+  ad_spend_ratio_high:
+    aggregate_only: true
+    guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.
+  ad_spend_without_sales:
+    aggregate_only: true
+    guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.
