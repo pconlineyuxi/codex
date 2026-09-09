@@ -50,6 +50,15 @@ def parse_time_range(description: str, today: date | None = None):
     numeric = _parse_numeric_date_range(text, today)
     if numeric:
         return numeric
+    # Match whole-year requests only; leave month/day-qualified requests to the
+    # more specific rules or the date-anchored AI parser.
+    year_phrase = re.search(r"今年截至(?:目前|今天)|今年至今|year to date|\bytd\b|今年|去年|this year|last year", text)
+    if year_phrase and not re.search(r"月|季度|半年|昨天|今天|昨日|今日|(?:\d+)\s*(?:天|日)|today|yesterday", text.replace(year_phrase.group(0), "")):
+        phrase = year_phrase.group(0)
+        year = today.year - (1 if phrase in {"去年", "last year"} else 0)
+        start = date(year, 1, 1)
+        end = today + timedelta(days=1) if phrase in {"今年截至目前", "今年截至今天", "今年至今", "year to date", "ytd"} else date(year + 1, 1, 1)
+        return start, end, phrase, f"{year}年", "已按纽约当前日期解析年份，结束日期不包含；实际数据完整性需另行核对。"
     for phrase, offset in [('前天',2),('昨天',1),('昨日',1),('yesterday',1),('今天',0),('今日',0),('today',0)]:
         if phrase in text:
             start=today-timedelta(days=offset)

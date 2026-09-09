@@ -5,7 +5,7 @@ import os
 import re
 from typing import Any
 
-from bi_check_agent.parser_rules import fallback_parse, parse_time_range
+from bi_check_agent.parser_rules import fallback_parse, parse_time_range, today_est
 from bi_check_agent.parser_schema import (
     ALLOWED_AGGREGATION_DIMENSIONS,
     ANOMALY_RULES,
@@ -75,7 +75,7 @@ def _merge_rule_overrides(description: str, parsed: dict[str, Any]) -> dict[str,
 
 def ai_parse(description: str) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model = os.getenv("OPENAI_MODEL", "gpt-5.4")
     if not api_key:
         return fallback_parse(description)
 
@@ -86,7 +86,10 @@ Do not write SQL. Do not calculate metrics. Do not invent filters or anomaly rul
 
 Hard rules:
 - intent/query_mode is data_query for normal data lookup and data_anomaly_query only when the user explicitly asks for anomalies/problems or names an anomaly rule; data_domain is product_profit.
-- Timezone is America/New_York.
+- Timezone is America/New_York. Current local date is {today_est().isoformat()}.
+- Resolve relative dates against this current date, never your training cutoff or example data.
+- 今年/this year means the current calendar year, 去年/last year means the preceding calendar year.
+- 今年截至目前/year to date starts January 1 and ends tomorrow (exclusive).
 - All date ranges are left-closed and right-open: date_order >= start_date AND date_order < end_date.
 - Full natural month ranges must use first day of next month as end_date.
 - Empty filter arrays mean no restriction / all values.
@@ -126,7 +129,6 @@ Return this JSON shape:
             model=model,
             response_format={"type": "json_object"},
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": description}],
-            temperature=0,
         )
         raw = _clean_json_dict(response.choices[0].message.content or "{}")
         merged = default_parser_result()
