@@ -121,8 +121,8 @@ def rule_unknowns(rows, rules):
 
 def query(req: AnomalyQueryRequest, mode='demo'):
     if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
-    if mode=='live_test' and (len(req.store)!=1 or (req.end_date-req.start_date).days>7):
-        raise ValueError('真实测试请选择一个店铺，查询范围最多 7 天。')
+    if mode=='live_test' and len(req.store)!=1:
+        raise ValueError('真实测试请选择一个店铺。')
     _,_,applied,skipped=core.build_order_line_sql(req)
     before=_contract(req.start_date,req.end_date) if mode=='live' else None
     frames=[]

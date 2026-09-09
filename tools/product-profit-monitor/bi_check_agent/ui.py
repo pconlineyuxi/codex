@@ -245,7 +245,7 @@ def main():
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
     st.title('Product Profit 数据工作台')
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
-    elif mode=='live_test':st.warning('真实数据测试 · 单店铺、最多 7 天；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
+    elif mode=='live_test':st.warning('真实数据测试 · 单店铺、最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
     else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
     store=MonitorStore(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3'))
     if page=='巡查概览':overview(store,mode)

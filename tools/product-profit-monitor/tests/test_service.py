@@ -206,3 +206,19 @@ def test_live_testing_is_bounded_and_not_monitor_evidence(monkeypatch):
     assert result['evidence']['snapshot'] is None
     with pytest.raises(ValueError,match='不能用于'):
         service.evaluate_plan({'mode':'live_test','rules':['missing_product_cost']},'2026-09-08','2026-09-09')
+
+
+def test_full_leap_year_query_limit(monkeypatch):
+    from datetime import timedelta
+    from bi_check_agent import service
+    monkeypatch.delenv('MAX_QUERY_DAYS', raising=False)
+    request = AnomalyQueryRequest(start_date=date(2024,1,1), end_date=date(2025,1,1), store=['Test Store'])
+    core.build_where_clause(request)
+    # Reach the reader beyond the former seven-day live-test gate, without
+    # actually reading a year of production data.
+    class ReaderReached(Exception): pass
+    def reader(*args): raise ReaderReached()
+    monkeypatch.setattr(db, 'run_query', reader)
+    with pytest.raises(ReaderReached): service.query(request, 'live_test')
+    too_long = request.model_copy(update={'end_date':request.end_date+timedelta(days=1)})
+    with pytest.raises(ValueError, match='366'): service.query(too_long, 'live_test')

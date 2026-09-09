@@ -70,7 +70,7 @@ def build_where_clause(req: AnomalyQueryRequest) -> tuple[str, dict[str, Any], l
     mapping = load_yaml("filter_mapping.yaml")
     params: dict[str, Any] = {"start_date": f"{req.start_date.isoformat()} 00:00:00", "end_date": f"{req.end_date.isoformat()} 00:00:00"}
     rules_cfg = load_yaml("diagnostic_rules.yaml")
-    max_days = int(os.getenv("MAX_QUERY_DAYS", str(rules_cfg.get("thresholds", {}).get("max_query_days", 180))))
+    max_days = int(os.getenv("MAX_QUERY_DAYS", str(rules_cfg.get("thresholds", {}).get("max_query_days", 366))))
     if (req.end_date - req.start_date).days > max_days:
         raise ValueError(f"查询时间跨度超过 {max_days} 天，请缩小 Time range")
     base_clauses = ["date_order >= TO_TIMESTAMP(:start_date, 'YYYY-MM-DD HH24:MI:SS')", "date_order < TO_TIMESTAMP(:end_date, 'YYYY-MM-DD HH24:MI:SS')"]

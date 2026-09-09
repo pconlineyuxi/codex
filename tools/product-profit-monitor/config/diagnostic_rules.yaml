@@ -9,7 +9,7 @@ thresholds:
   promotion_ratio_high: 0.50
   ad_spend_ratio_high: 0.10
   profit_rate_with_ads_ship_high: 1.0
-  max_query_days: 180
+  max_query_days: 366
   max_result_rows: 50000
 queryable_rules:
   zero_units_with_sales:
