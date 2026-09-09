@@ -119,7 +119,7 @@ def rule_unknowns(rows, rules):
     return result
 
 
-def query(req: AnomalyQueryRequest, mode='demo'):
+def query(req: AnomalyQueryRequest, mode='demo', progress=None):
     if not req.aggregation_dimensions: raise ValueError('汇总维度不能为空，请至少选择一个汇总维度')
     if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
     _,_,applied,skipped=core.build_order_line_sql(req)
@@ -127,7 +127,9 @@ def query(req: AnomalyQueryRequest, mode='demo'):
     frames=[]
     cap=int(os.getenv('MAX_RESULT_ROWS','50000'))
     if cap < 1: raise ValueError('MAX_RESULT_ROWS 必须大于零')
-    if mode=='demo': frames=[demo_rows(req)]
+    if mode=='demo':
+        frames=[demo_rows(req)]
+        if progress: progress((req.end_date-req.start_date).days,(req.end_date-req.start_date).days)
     else:
         for offset in range((req.end_date-req.start_date).days):
             start=req.start_date+timedelta(days=offset)
@@ -137,6 +139,7 @@ def query(req: AnomalyQueryRequest, mode='demo'):
             if len(rows)>=params['max_rows']:
                 raise RuntimeError('单日数据超过读取上限，本次检查不完整。请按店铺或平台缩小计划范围。')
             frames.append(rows)
+            if progress: progress(offset+1,(req.end_date-req.start_date).days)
         if mode=='live':
             after=_contract(req.start_date,req.end_date)
             if before != after:

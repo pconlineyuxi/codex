@@ -114,40 +114,23 @@ def overview(store, mode):
                 st.link_button('查看证据与历史',f"?incident={i['id']}&mode={mode}")
 
 
-def queries(mode):
-    st.subheader('业务问题定位')
-    st.write('描述问题，核对范围，再用同一套规则查看证据。')
-    text=st.text_area('业务问题',placeholder='查昨天 SKU DEMO-COST 的产品成本缺失数据',key='question')
-    if st.button('解析为查询草稿'):
-        try:
-            parsed=parse_business_description(text)
-            st.session_state['parsed_query']=parsed
-        except Exception as exc:_err(exc)
-    parsed=st.session_state.get('parsed_query',{})
-    if parsed:
-        st.caption('解析结果仅作为草稿；以下实际执行范围需要你核对。')
-        with st.expander('查看解析结果与未识别条件',expanded=bool(parsed.get('missing_required_fields') or parsed.get('unresolved_terms'))): st.json(parsed)
-    def parsed_date(name,fallback):
-        try:return date.fromisoformat(parsed.get(name,''))
-        except (ValueError,TypeError):return fallback
-    c1,c2=st.columns(2)
-    start=c1.date_input('开始日期',value=parsed_date('start_date',_now()-timedelta(days=1 if mode=='live_test' else 7)))
-    end=c2.date_input('结束日期（不包含）',value=parsed_date('end_date',_now()))
+def business_filters(mode,start,end,parsed,namespace="query",windows=None):
     # Use form keys tied to parser output so a new draft fills all filter fields.
     import hashlib
-    draft=hashlib.sha256(json.dumps(parsed,sort_keys=True,default=str).encode()).hexdigest()[:8]
+    draft=namespace if namespace.startswith('profit') else namespace+hashlib.sha256(json.dumps(parsed,sort_keys=True,default=str).encode()).hexdigest()[:8]
     c1,c2,c3=st.columns(3)
     filters={}
     fields=[('sku','SKU'),('ir','IR'),('main_ir','Main IR'),('marketplace','平台'),('store','店铺'),('order_id','订单号')]
-    window_key=f'{start.isoformat()}:{end.isoformat()}'
-    loaded=st.session_state.get('business_options',{})
+    windows=windows or [(start,end)]
+    window_key=str(windows)
+    loaded=st.session_state.get(namespace+'business_options',{})
     if loaded.get('window')!=window_key: loaded={}
     if mode!='demo':
         if st.button('加载当前日期范围内的平台和店铺选项'):
             try:
                 with st.spinner('读取平台和店铺名称…'):
-                    loaded={'window':window_key,'pairs':available_business_options(start,end)}
-                    st.session_state['business_options']=loaded
+                    loaded={'window':window_key,'pairs':[row for lo,hi in windows for row in available_business_options(lo,hi)]}
+                    st.session_state[namespace+'business_options']=loaded
                 if not loaded['pairs']: st.info('当前日期范围未找到平台和店铺选项。')
             except Exception as exc: _err(exc)
         st.caption('平台、店铺均可多选；留空不限制。修改日期后请重新加载选项，选择平台后店铺选项会相应更新。')
@@ -178,6 +161,29 @@ def queries(mode):
             selected=st.multiselect(label,[True,False],default=[v for v in default if isinstance(v,bool)],
                 format_func=lambda x:'是' if x else '否',key=draft+key)
             if selected:filters[key]=selected
+    return filters
+
+
+def queries(mode):
+    st.subheader('业务问题定位')
+    st.write('描述问题，核对范围，再用同一套规则查看证据。')
+    text=st.text_area('业务问题',placeholder='查昨天 SKU DEMO-COST 的产品成本缺失数据',key='question')
+    if st.button('解析为查询草稿'):
+        try:
+            parsed=parse_business_description(text)
+            st.session_state['parsed_query']=parsed
+        except Exception as exc:_err(exc)
+    parsed=st.session_state.get('parsed_query',{})
+    if parsed:
+        st.caption('解析结果仅作为草稿；以下实际执行范围需要你核对。')
+        with st.expander('查看解析结果与未识别条件',expanded=bool(parsed.get('missing_required_fields') or parsed.get('unresolved_terms'))): st.json(parsed)
+    def parsed_date(name,fallback):
+        try:return date.fromisoformat(parsed.get(name,''))
+        except (ValueError,TypeError):return fallback
+    c1,c2=st.columns(2)
+    start=c1.date_input('开始日期',value=parsed_date('start_date',_now()-timedelta(days=1 if mode=='live_test' else 7)))
+    end=c2.date_input('结束日期（不包含）',value=parsed_date('end_date',_now()))
+    filters=business_filters(mode,start,end,parsed)
     dims=st.multiselect('汇总维度',['main_ir','ir','sku','marketplace','store','day','week','month'],default=parsed.get('aggregation_dimensions') or ['marketplace','store','sku'])
     if not dims: st.warning('汇总维度不能为空，请至少选择一个汇总维度。')
     rules=st.multiselect('检查规则（留空只查询）',list(RULE_LABELS),default=parsed.get('anomaly_rules',[]),format_func=RULE_LABELS.get)
@@ -208,28 +214,6 @@ def queries(mode):
         st.info(result['evidence']['localization_limit'])
         with st.expander('查询凭据'):
             st.json(result['evidence'])
-    st.divider()
-    st.markdown('**两个时期的利润差异分解**')
-    st.caption('复用上面的业务范围。演示时选择 DEMO-HEALTHY 或 DEMO-SHIP；DEMO-COST 会因成本缺失阻止完整归因。')
-    c1,c2=st.columns(2)
-    prev_start=c1.date_input('对比期开始',_now()-timedelta(days=14))
-    prev_end=c2.date_input('对比期结束（不包含）',_now()-timedelta(days=7))
-    if st.button('比较利润变化',disabled=not accepted or not dims):
-        try:
-            with st.spinner('按同一口径比较两个时期…'):
-                a=query(AnomalyQueryRequest(start_date=prev_start,end_date=prev_end,aggregation_dimensions=dims,**filters),mode)
-                b=query(AnomalyQueryRequest(start_date=start,end_date=end,aggregation_dimensions=dims,**filters),mode)
-                if a['evidence']['currency']!=b['evidence']['currency']:raise ValueError('两个时期币种不一致，不能直接比较。')
-                if mode=='live' and a['evidence']['snapshot']!=b['evidence']['snapshot']:raise ValueError('两个时期读取时刷新状态改变，请重新比较。')
-                report=decompose(a['rows'],b['rows'])
-            cols=st.columns(3)
-            for col,label,key in zip(cols,['对比期利润','当前期利润','利润变化'],['previous_profit','current_profit','difference']):col.metric(label,f"{report[key]:,.2f}")
-            frame=pd.DataFrame(report['components'])
-            st.dataframe(frame,width='stretch',hide_index=True)
-            st.bar_chart(frame.set_index('item')['contribution'],color='#0f766e')
-            st.caption(f"舍入差：{report['reconciliation_error']}；正值增加利润，负值减少利润。")
-            st.info(report['conclusion'])
-        except Exception as exc:_err(exc)
 
 
 def history(store,mode):
@@ -306,8 +290,8 @@ def main():
         st.markdown('### PRODUCT PROFIT')
         st.caption('数据巡查与问题定位')
         mode=st.selectbox('数据模式',['demo','live_test','live'],index={'demo':0,'live_test':1,'live':2}.get(st.query_params.get('mode','demo'),0),format_func=lambda x:{'demo':'演示数据','live_test':'真实数据测试（只读）','live':'正式巡查数据（只读）'}[x])
-        sections=['巡查概览','业务问题定位','异常历史','巡查计划']
-        page=st.radio('工作区',sections,index=2 if st.query_params.get('incident') else (1 if mode=='live_test' else 0))
+        sections=['巡查概览','业务问题定位','利润变化分析','异常历史','巡查计划']
+        page=st.radio('工作区',sections,index=3 if st.query_params.get('incident') else (2 if st.query_params.get('page')=='profit' else (1 if mode=='live_test' else 0)))
         st.divider();st.caption('纽约时间 · 本地开发版')
         st.caption('演示与真实数据分别记录。所有异常都需要证据，不自动修复数据。')
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
@@ -317,11 +301,14 @@ def main():
     else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
     store=MonitorStore(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3'))
     monitor_mode='live' if mode=='live_test' else mode
-    if mode=='live_test' and page!='业务问题定位':
+    if mode=='live_test' and page not in {'业务问题定位','利润变化分析'}:
         st.info('这里展示真实巡查记录和计划。手动测试查询可直接使用；正式巡查执行前仍需确认数据刷新、币种和时区。')
     if page=='巡查概览':
         overview(store,monitor_mode)
         manual_scan(store,mode)
     elif page=='业务问题定位':queries(mode)
+    elif page=='利润变化分析':
+        from bi_check_agent.profit_ui import render
+        render(mode,business_filters,_csv,_err)
     elif page=='异常历史':history(store,monitor_mode)
     else:plans(store,monitor_mode)
