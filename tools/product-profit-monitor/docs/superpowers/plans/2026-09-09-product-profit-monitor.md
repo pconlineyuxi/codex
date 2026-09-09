@@ -2,6 +2,8 @@
 
 > **For agentic workers:** Use subagent-driven-development for bounded implementation and review, with local integration. Steps track completion below.
 
+目录迁移说明：工具现位于 `tools/product-profit-monitor/`。下文工具文件路径均相对该目录；GitHub workflow 位于仓库根目录 `.github/workflows/tests.yml`。
+
 **Goal:** A locally runnable Product Profit query/diagnostic interface and durable scheduled monitor, pushed to pconlineyuxi/codex, ready for real-data configuration before server deployment.
 
 **Architecture:** Preserve the existing Streamlit/Pydantic parser, build one shared query/check service, and add SQLite run/incident/outbox persistence plus a standalone worker. Explicit demo mode is isolated from live mode; no live credentials or notification targets are bundled.
