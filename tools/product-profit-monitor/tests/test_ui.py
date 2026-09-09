@@ -45,7 +45,7 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     from pathlib import Path
     from bi_check_agent import ui, service
     monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'state.sqlite3'))
-    monkeypatch.setattr(ui,'available_stores',lambda *a:['Store A','Store B'])
+    monkeypatch.setattr(ui,'available_business_options',lambda *a:[{'market_place':'Platform A','store':'Store A'},{'market_place':'Platform B','store':'Store B'}])
     seen=[]
     def fake_query(request,mode):
         seen.append(request.store)
@@ -53,7 +53,7 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     monkeypatch.setattr(ui,'query',fake_query)
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
     next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()
-    next(b for b in app.button if b.label=='加载当前日期范围内的店铺选项').click().run()
+    next(b for b in app.button if b.label=='加载当前日期范围内的平台和店铺选项').click().run()
     selector=next(m for m in app.multiselect if m.label=='店铺（留空为全部）')
     assert selector.options==['Store A','Store B']
     next(b for b in app.button if b.label=='执行查询与检查').click().run()
@@ -62,6 +62,9 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     next(m for m in app.multiselect if m.label=='店铺（留空为全部）').set_value(['Store A','Store B']).run()
     next(b for b in app.button if b.label=='执行查询与检查').click().run()
     assert seen[-1]==['Store A','Store B']
+    next(m for m in app.multiselect if m.label=='平台（留空为全部）').set_value(['Platform A']).run()
+    assert next(m for m in app.multiselect if m.label=='店铺（留空为全部）').options==['Store A']
+    assert not app.exception
 
 
 def test_manual_scan_runs_without_enabling_schedule(tmp_path,monkeypatch):

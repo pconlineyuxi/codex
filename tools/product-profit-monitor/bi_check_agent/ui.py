@@ -1,4 +1,4 @@
-from bi_check_agent.service import summarize_findings, without_order_samples, available_stores
+from bi_check_agent.service import summarize_findings, without_order_samples, available_business_options
 """Local Product Profit workbench; one shared engine for queries and monitoring."""
 from datetime import date, datetime, timedelta
 import json
@@ -139,18 +139,30 @@ def queries(mode):
     c1,c2,c3=st.columns(3)
     filters={}
     fields=[('sku','SKU'),('ir','IR'),('main_ir','Main IR'),('marketplace','平台'),('store','店铺'),('order_id','订单号')]
+    window_key=f'{start.isoformat()}:{end.isoformat()}'
+    loaded=st.session_state.get('business_options',{})
+    if loaded.get('window')!=window_key: loaded={}
     if mode!='demo':
-        if st.button('加载当前日期范围内的店铺选项'):
+        if st.button('加载当前日期范围内的平台和店铺选项'):
             try:
-                with st.spinner('读取店铺名称…'):
-                    st.session_state['store_options']=available_stores(start,end)
-                if not st.session_state['store_options']: st.info('当前日期范围未找到店铺，可以留空查询全部范围。')
+                with st.spinner('读取平台和店铺名称…'):
+                    loaded={'window':window_key,'pairs':available_business_options(start,end)}
+                    st.session_state['business_options']=loaded
+                if not loaded['pairs']: st.info('当前日期范围未找到平台和店铺选项。')
             except Exception as exc: _err(exc)
-        st.caption('店铺可不选，留空查询全部店铺；可加载实际店铺名称后多选。')
+        st.caption('平台、店铺均可多选；留空不限制。修改日期后请重新加载选项，选择平台后店铺选项会相应更新。')
     for idx,(key,label) in enumerate(fields):
-        if key=='store' and mode!='demo':
-            options=list(dict.fromkeys(st.session_state.get('store_options',[])+parsed.get('store',[])))
-            value=[c1,c2,c3][idx%3].multiselect('店铺（留空为全部）',options,default=parsed.get('store',[]),key=draft+key)
+        if key in {'marketplace','store'} and mode!='demo':
+            pairs=loaded.get('pairs',[])
+            if key=='marketplace':
+                options=sorted({r['market_place'] for r in pairs if r.get('market_place')})
+            else:
+                platforms=filters.get('marketplace',[])
+                options=sorted({r['store'] for r in pairs if r.get('store') and (not platforms or r.get('market_place') in platforms)})
+            if not loaded: options=list(dict.fromkeys(options+parsed.get(key,[])))
+            defaults=[v for v in parsed.get(key,[]) if v in options]
+            option_key=hashlib.sha256(json.dumps(options,ensure_ascii=False).encode()).hexdigest()[:8]
+            value=[c1,c2,c3][idx%3].multiselect(label+'（留空为全部）',options,default=defaults,key=draft+window_key+key+option_key)
             if value: filters[key]=value
             continue
         value=[x.strip() for x in [c1,c2,c3][idx%3].text_input(label,', '.join(parsed.get(key,[])),key=draft+key).split(',') if x.strip()]

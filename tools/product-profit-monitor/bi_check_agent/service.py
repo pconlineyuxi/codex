@@ -253,14 +253,14 @@ def without_order_samples(value):
     return value
 
 
-def available_stores(start, end):
-    """Read actual store names for the selected window, without order details."""
+def available_business_options(start, end):
+    """Read platform/store pairs in the selected date window only."""
     request = AnomalyQueryRequest(start_date=start, end_date=end)
     core.build_where_clause(request)
     frame = db.run_query(
-        "SELECT DISTINCT store FROM bi.ba_mv_profit_order_line_and_ad_info "
+        "SELECT DISTINCT market_place, store FROM bi.ba_mv_profit_order_line_and_ad_info "
         "WHERE date_order >= :start AND date_order < :end "
-        "AND store IS NOT NULL AND store <> '' ORDER BY store",
+        "ORDER BY market_place, store",
         {'start': start, 'end': end},
     )
-    return frame['store'].astype(str).tolist()
+    return records(frame)
