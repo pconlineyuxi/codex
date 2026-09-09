@@ -28,7 +28,8 @@ def test_snapshot_reconciles_and_contains_no_order_rows():
     assert snap['report']['difference']==pytest.approx(sum(x['contribution'] for x in snap['report']['components']))
     assert snap['scope_key']==analysis.scope_key(*requests(),'demo')
     assert snap['previous_days']==snap['current_days']==1
-    assert 'rows' not in snap and 'order_name' not in json.dumps(snap)
+    assert len(snap['_source_frames']['current'])>0
+    assert 'order_name' not in json.dumps(analysis.context_for(snap,'test'))
     assert events[-1][0]==1
     assert '对比期' in events[0][1] and '本期' in events[-1][1]
 
@@ -47,30 +48,34 @@ def test_empty_period_not_zero_profit(monkeypatch):
     with pytest.raises(ValueError,match='没有数据'):analysis.compare(*requests(),'live_test')
 
 
-def test_context_is_bounded_and_finds_requested_object():
+def test_context_uses_source_not_presentation_aggregates():
     snap=snapshot()
-    snap['current_aggregate']=[{'sku':f'SKU-{i:04d}','Profit with Ads & Ship':i,'order_name':'never-send','secret':'never-send'} for i in range(200)]
-    ctx=analysis.context_for(snap,'SKU-0001 的利润是多少？',limit=5)
-    assert len(ctx['aggregate_rows'])==5
-    assert any(r.get('sku')=='SKU-0001' for r in ctx['aggregate_rows'])
-    assert not ctx['coverage']['complete']
-    assert ctx['totals']['difference']==snap['report']['difference']
+    snap['current_aggregate']=[{'sku':'fabricated','secret':'never-send'}]
+    ctx=analysis.context_for(snap,'分析源数据')
+    assert 'aggregate_rows' not in ctx
+    assert ctx['periods']['current']['source_record_count']==len(snap['_source_frames']['current'])
     assert 'never-send' not in json.dumps(ctx)
 
 
-def test_answer_uses_snapshot_and_history_not_tools(monkeypatch):
+def test_answer_calls_source_tool_and_uses_history(monkeypatch):
     import openai
     monkeypatch.setenv('OPENAI_API_KEY','fake-test-key')
-    captured={}
+    captured=[]
     def create(**kwargs):
-        captured.update(kwargs)
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='费用贡献见 [component-1]。'))])
+        captured.append(dict(kwargs,messages=list(kwargs['messages'])))
+        if len(captured)==1:
+            call=SimpleNamespace(id='call1',function=SimpleNamespace(name='analyze_filtered_source_data',arguments=json.dumps({'period':'both','operation':'statistics','measures':[{'field':'shipping_fee','statistic':'sum'}]})))
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None,tool_calls=[call]))])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='源数据运费统计见 [source-1]。',tool_calls=[]))])
     monkeypatch.setattr(openai,'OpenAI',lambda **kw:SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
-    result=analysis.answer(snapshot(),'为什么？',[{'role':'user','content':'销售额变了吗？'},{'role':'assistant','content':'旧回答'}])
-    assert result['content'] and result['evidence']['analysis_id']
-    assert captured['store'] is False and 'tools' not in captured
-    assert captured['messages'][-1]['content']=='为什么？'
-    assert captured['messages'][-3]['content']=='销售额变了吗？'
+    result=analysis.answer(snapshot(),'为什么？',[{'role':'user','content':'运费变了吗？'},{'role':'assistant','content':'旧回答'}])
+    assert result['coverage']['basis']=='filtered_source_records'
+    assert result['coverage']['analysis_operations']==1
+    assert captured[0]['tool_choice']=='required'
+    assert captured[0]['store'] is False
+    assert captured[0]['messages'][-1]['content']=='为什么？'
+    tool=json.loads(captured[1]['messages'][-1]['content'])
+    assert tool['periods']['current']['matched_record_count']>0
     assert 'fake-test-key' not in json.dumps(captured)
 
 

@@ -10,6 +10,7 @@ import streamlit as st
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent import profit_analysis as analysis
 from bi_check_agent.service import amount_change_percent
+from bi_check_agent.source_analysis import public_evidence
 
 
 def render(mode, business_filters, csv, error):
@@ -107,8 +108,11 @@ def render(mode, business_filters, csv, error):
         with st.expander('本次计算与范围凭据'):
             st.json({k:snapshot[k] for k in ['id','current_request','previous_request','current_evidence','previous_evidence']})
         st.markdown('**就这份数据继续提问**')
-        st.caption(f"模型：{os.getenv('OPENAI_MODEL','gpt-5.4')}。发送问题时使用本次汇总数据、费用贡献和最近对话；不发送订单行。")
+        st.caption(f"模型：{os.getenv('OPENAI_MODEL','gpt-5.4')}。AI 按需分析本次筛选后、汇总前的源数据，可重新筛选、分组计算和检查相关源记录样本。页面仍只展示汇总结果。")
         st.caption('例如：利润下降主要来自哪项费用？广告费用的变化能否解释利润下降？这份数据还不足以证明什么？')
+        source_ready='_source_frames' in snapshot
+        if not source_ready: st.info('这份旧结果没有保留源数据；请重新点击“开始利润分析”，之后即可基于源数据提问。')
+        else: st.caption('可分析源记录：对比期 '+str(len(snapshot['_source_frames']['previous']))+' 条，本期 '+str(len(snapshot['_source_frames']['current']))+' 条。统计覆盖匹配的完整源记录；样本检查会单独标注覆盖数量。')
         history=st.session_state.setdefault('profit_chat',[])
         if history and st.button('清空本次对话'):
             st.session_state['profit_chat']=[]
@@ -116,20 +120,20 @@ def render(mode, business_filters, csv, error):
         for item in history:
             with st.chat_message(item['role']):
                 st.markdown(item['content'])
-                if item.get('coverage') and not item['coverage']['complete']:
-                    st.caption(f"本回答包含 {item['coverage']['included_aggregate_rows']}/{item['coverage']['total_aggregate_rows']} 条汇总记录，整体费用贡献覆盖全范围。")
+                if item.get('coverage',{}).get('basis')=='filtered_source_records':
+                    st.caption(f"已执行 {item['coverage']['analysis_operations']} 项源数据分析，可展开核对筛选条件、参与计算记录数及返回范围。")
                 if item.get('evidence'):
-                    with st.expander('查看回答所用数据与证据编号'): st.json(item['evidence'])
-        question=st.chat_input('针对本次利润对比，输入你的问题…',disabled=stale,key='profit_question')
+                    with st.expander('查看回答所用数据与证据编号'): st.json(public_evidence(item['evidence']))
+        question=st.chat_input('针对本次利润对比，输入你的问题…',disabled=stale or not source_ready,key='profit_question')
         if question:
             with st.chat_message('user'): st.markdown(question)
             try:
                 with st.chat_message('assistant'):
-                    with st.spinner('结合本次分析数据回答…'):
+                    with st.spinner('分析筛选后的源数据并回答…'):
                         reply=analysis.answer(snapshot,question,history)
                     st.markdown(reply['content'])
-                    if not reply['coverage']['complete']:
-                        st.caption(f"本回答包含 {reply['coverage']['included_aggregate_rows']}/{reply['coverage']['total_aggregate_rows']} 条汇总记录；不是全量对象排名。")
-                    with st.expander('查看回答所用数据与证据编号'):st.json(reply['evidence'])
+                    if reply.get('coverage',{}).get('basis')=='filtered_source_records':
+                        st.caption(f"已执行 {reply['coverage']['analysis_operations']} 项源数据分析，可展开核对分析范围和证据。")
+                    with st.expander('查看回答所用数据与证据编号'):st.json(public_evidence(reply['evidence']))
                 history.extend([{'role':'user','content':question},{'role':'assistant',**reply}])
             except Exception as exc:error(exc)

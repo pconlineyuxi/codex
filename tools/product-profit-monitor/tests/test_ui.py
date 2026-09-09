@@ -144,3 +144,19 @@ def test_failed_comparison_keeps_previous_result(tmp_path,monkeypatch):
     assert any('测试读取失败' in e.value for e in app.error)
     assert app.session_state['profit_snapshot']['id']==initial
     assert len(app.metric)==3 and app.chat_input[0].disabled
+
+
+def test_old_profit_snapshot_cannot_silently_use_aggregate_chat(tmp_path,monkeypatch):
+    from pathlib import Path
+    monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'state.sqlite3'))
+    app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
+    next(r for r in app.radio if r.label=='工作区').set_value('利润变化分析').run()
+    next(t for t in app.text_input if t.label=='SKU').set_value('DEMO-HEALTHY').run()
+    next(b for b in app.button if b.label=='开始利润分析').click().run(timeout=20)
+    old=dict(app.session_state['profit_snapshot'])
+    old.pop('_source_frames')
+    app.session_state['profit_snapshot']=old
+    app.run()
+    assert len(app.metric)==3
+    assert app.chat_input[0].disabled
+    assert any('旧结果没有保留源数据' in info.value for info in app.info)
