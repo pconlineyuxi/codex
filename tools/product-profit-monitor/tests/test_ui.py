@@ -20,7 +20,7 @@ def test_manual_live_mode_keeps_workspaces_and_optional_store(tmp_path,monkeypat
     from pathlib import Path
     monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'test.sqlite3'))
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
-    app.selectbox[0].set_value('live_test').run()
+    next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()
     assert not app.exception
     assert app.radio[0].options==['巡查概览','业务问题定位','异常历史','巡查计划']
     assert next(m for m in app.multiselect if m.label=='店铺（留空为全部）').value==[]
@@ -52,7 +52,7 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
         return service.query(request,'demo')
     monkeypatch.setattr(ui,'query',fake_query)
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
-    app.selectbox[0].set_value('live_test').run()
+    next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()
     next(b for b in app.button if b.label=='加载当前日期范围内的店铺选项').click().run()
     selector=next(m for m in app.multiselect if m.label=='店铺（留空为全部）')
     assert selector.options==['Store A','Store B']
@@ -62,3 +62,25 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     next(m for m in app.multiselect if m.label=='店铺（留空为全部）').set_value(['Store A','Store B']).run()
     next(b for b in app.button if b.label=='执行查询与检查').click().run()
     assert seen[-1]==['Store A','Store B']
+
+
+def test_manual_scan_runs_without_enabling_schedule(tmp_path,monkeypatch):
+    from pathlib import Path
+    from bi_check_agent import ui, service
+    monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'state.sqlite3'))
+    seen=[]
+    def fake_query(request,mode):
+        seen.append((request,mode))
+        return service.query(request,'demo')
+    monkeypatch.setattr(ui,'query',fake_query)
+    app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
+    next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()
+    app.radio[0].set_value('巡查概览').run()
+    next(b for b in app.button if b.label=='立即巡查').click().run()
+    assert not app.exception and not app.error
+    assert seen[0][1]=='live_test'
+    assert seen[0][0].anomaly_rules and seen[0][0].aggregation_dimensions
+    assert len(list((tmp_path/'manual-scans').glob('*.json')))==1
+    from bi_check_agent.monitor import MonitorStore
+    assert MonitorStore(tmp_path/'state.sqlite3').plans()==[]
+    assert MonitorStore(tmp_path/'state.sqlite3').outbox()==[]

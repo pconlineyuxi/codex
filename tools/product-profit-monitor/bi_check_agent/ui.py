@@ -34,6 +34,46 @@ def _err(exc):
         st.error('本次操作未完成，请检查本地服务配置。未将失败判定为检查通过。')
 
 
+def manual_scan(store, mode):
+    st.markdown('**手动巡查**')
+    saved=[p for p in store.plans() if p.get('mode')==('live' if mode=='live_test' else mode)]
+    choices={p['id']:p for p in saved}
+    selected=st.selectbox('手动巡查计划',['临时检查']+list(choices),format_func=lambda x:choices[x]['name'] if x in choices else x)
+    plan=choices.get(selected)
+    rules=st.multiselect('手动巡查规则',list(RULE_LABELS),default=(plan or {}).get('rules',['missing_product_cost','shipping_cost_ratio_high']),format_func=RULE_LABELS.get)
+    dims=st.multiselect('手动巡查汇总维度',['marketplace','store','sku','main_ir','ir','day','week','month'],default=(plan or {}).get('filters',{}).get('aggregation_dimensions') or ['marketplace','store','sku'])
+    left,right=st.columns(2)
+    start=left.date_input('巡查开始日期',_now()-timedelta(days=(plan or {}).get('lookback_days',1)))
+    end=right.date_input('巡查结束日期（不包含）',_now())
+    st.caption('复用所选计划的业务筛选；临时检查覆盖全部店铺。手动触发不启用后台计划或发送通知。')
+    if not rules or not dims: st.warning('请至少选择一条规则和一个汇总维度。')
+    if st.button('立即巡查',type='primary',disabled=not rules or not dims):
+        try:
+            filters={**(plan or {}).get('filters',{}),'aggregation_dimensions':dims}
+            request=AnomalyQueryRequest(start_date=start,end_date=end,anomaly_rules=rules,**filters)
+            with st.spinner('执行手动巡查…'):
+                result=query(request,mode)
+                summary=summarize_findings(result['anomalies'],dims)
+                # Manual runs are isolated from formal recovery and notification state.
+                from pathlib import Path
+                from uuid import uuid4
+                record={'id':str(uuid4()),'plan_id':(plan or {}).get('id'),'evidence':result['evidence'],'summary':records(summary)}
+                folder=Path(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3')).parent/'manual-scans'
+                folder.mkdir(parents=True,exist_ok=True)
+                (folder/(record['id']+'.json')).write_text(json.dumps(record,ensure_ascii=False,default=str))
+                st.session_state['manual_scan_result']=(mode,record)
+            st.success('手动巡查完成，已保存独立检查记录；未更新正式异常恢复状态或发送通知。')
+        except Exception as exc:_err(exc)
+    cached=st.session_state.get('manual_scan_result')
+    if cached and cached[0]==mode:
+        record=cached[1]
+        st.caption(f"检查范围 {record['evidence']['start']} — {record['evidence']['end']} · {record['evidence']['row_count']} 条来源记录")
+        frame=pd.DataFrame(record['summary'])
+        if frame.empty: st.info('所选规则未命中；数据完整性仍以查询凭据为准。')
+        else: st.dataframe(frame,width='stretch',hide_index=True)
+        st.download_button('下载手动巡查记录',json.dumps(record,ensure_ascii=False,indent=2,default=str),'manual-scan.json','application/json')
+
+
 def overview(store, mode):
     st.subheader('巡查概览')
     st.caption('先确认检查是否完成，再看异常。没有检查记录不等于没有问题。')
@@ -267,7 +307,9 @@ def main():
     monitor_mode='live' if mode=='live_test' else mode
     if mode=='live_test' and page!='业务问题定位':
         st.info('这里展示真实巡查记录和计划。手动测试查询可直接使用；正式巡查执行前仍需确认数据刷新、币种和时区。')
-    if page=='巡查概览':overview(store,monitor_mode)
+    if page=='巡查概览':
+        overview(store,monitor_mode)
+        manual_scan(store,mode)
     elif page=='业务问题定位':queries(mode)
     elif page=='异常历史':history(store,monitor_mode)
     else:plans(store,monitor_mode)
