@@ -90,7 +90,7 @@ def queries(mode):
         try:return date.fromisoformat(parsed.get(name,''))
         except (ValueError,TypeError):return fallback
     c1,c2=st.columns(2)
-    start=c1.date_input('开始日期',value=parsed_date('start_date',_now()-timedelta(days=7)))
+    start=c1.date_input('开始日期',value=parsed_date('start_date',_now()-timedelta(days=1 if mode=='live_test' else 7)))
     end=c2.date_input('结束日期（不包含）',value=parsed_date('end_date',_now()))
     # Use form keys tied to parser output so a new draft fills all filter fields.
     import hashlib
@@ -237,14 +237,16 @@ def main():
     with st.sidebar:
         st.markdown('### PRODUCT PROFIT')
         st.caption('数据巡查与问题定位')
-        mode=st.selectbox('数据模式',['demo','live'],index=1 if st.query_params.get('mode')=='live' else 0,format_func=lambda x:'演示数据' if x=='demo' else '真实数据（只读）')
-        page=st.radio('工作区',['巡查概览','业务问题定位','异常历史','巡查计划'],index=2 if st.query_params.get('incident') else 0)
+        mode=st.selectbox('数据模式',['demo','live_test','live'],index={'demo':0,'live_test':1,'live':2}.get(st.query_params.get('mode','demo'),0),format_func=lambda x:{'demo':'演示数据','live_test':'真实数据测试（只读）','live':'正式巡查数据（只读）'}[x])
+        sections=['业务问题定位'] if mode=='live_test' else ['巡查概览','业务问题定位','异常历史','巡查计划']
+        page=st.radio('工作区',sections,index=2 if st.query_params.get('incident') and mode!='live_test' else 0)
         st.divider();st.caption('纽约时间 · 本地开发版')
         st.caption('演示与真实数据分别记录。所有异常都需要证据，不自动修复数据。')
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
     st.title('Product Profit 数据工作台')
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
-    else:st.info('真实模式 · 只读查询；需要数据库配置与可信刷新凭据。')
+    elif mode=='live_test':st.warning('真实数据测试 · 单店铺、最多 7 天；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
+    else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
     store=MonitorStore(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3'))
     if page=='巡查概览':overview(store,mode)
     elif page=='业务问题定位':queries(mode)

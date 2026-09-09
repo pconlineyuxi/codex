@@ -193,3 +193,16 @@ def test_missing_rule_operand_never_recovers(tmp_path,monkeypatch):
     second=store.run(plan,'2026-09-08','2026-09-09',service.evaluate_plan)
     assert second['status']=='failed'
     assert store.incidents()[0]['status']=='open'
+
+
+def test_live_testing_is_bounded_and_not_monitor_evidence(monkeypatch):
+    from bi_check_agent import service
+    with pytest.raises(ValueError,match='店铺'):service.query(req(),'live_test')
+    monkeypatch.setattr(db,'run_query',lambda *a:service.demo_rows(req(sku=['DEMO-HEALTHY'])))
+    monkeypatch.setattr(service,'_contract',lambda *a: (_ for _ in ()).throw(AssertionError('must not fabricate readiness')))
+    result=service.query(req(store=['Test Store']),'live_test')
+    assert result['evidence']['query_complete'] is True
+    assert result['evidence']['complete'] is False
+    assert result['evidence']['snapshot'] is None
+    with pytest.raises(ValueError,match='不能用于'):
+        service.evaluate_plan({'mode':'live_test','rules':['missing_product_cost']},'2026-09-08','2026-09-09')

@@ -120,7 +120,9 @@ def rule_unknowns(rows, rules):
 
 
 def query(req: AnomalyQueryRequest, mode='demo'):
-    if mode not in {'demo','live'}: raise ValueError('未知数据模式')
+    if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
+    if mode=='live_test' and (len(req.store)!=1 or (req.end_date-req.start_date).days>7):
+        raise ValueError('真实测试请选择一个店铺，查询范围最多 7 天。')
     _,_,applied,skipped=core.build_order_line_sql(req)
     before=_contract(req.start_date,req.end_date) if mode=='live' else None
     frames=[]
@@ -136,19 +138,22 @@ def query(req: AnomalyQueryRequest, mode='demo'):
             if len(rows)>=params['max_rows']:
                 raise RuntimeError('单日数据超过读取上限，本次检查不完整。请按店铺或平台缩小计划范围。')
             frames.append(rows)
-        after=_contract(req.start_date,req.end_date)
-        if before != after:
-            raise RuntimeError('查询期间刷新凭据发生变化，本次结果不完整，请重试。')
+        if mode=='live':
+            after=_contract(req.start_date,req.end_date)
+            if before != after:
+                raise RuntimeError('查询期间刷新凭据发生变化，本次结果不完整，请重试。')
     rows=pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
     if mode=='live' and rows.empty:
         raise RuntimeError('真实查询没有数据，尚不能区分无业务与数据缺失，本次不执行恢复判定。')
     if not rows.empty:
         rows=core._ensure_numeric(core._prepare_date_dimensions(rows))
     anomalies=core.detect_anomalies(rows,req.anomaly_rules)
-    evidence={'mode':mode,'complete':True,'start':str(req.start_date),'end':str(req.end_date),
+    evidence={'mode':mode,'complete':mode!='live_test','query_complete':True,'start':str(req.start_date),'end':str(req.end_date),
               'row_count':len(rows),'source':'synthetic_demo' if mode=='demo' else 'bi.ba_mv_profit_order_line_and_ad_info',
               'snapshot': before,'checked_at':datetime.now(timezone.utc).isoformat(),
-              'currency':'DEMO USD' if mode=='demo' else before['currency'],
+              'currency':'DEMO USD' if mode=='demo' else ('源金额（币种待核对）' if mode=='live_test' else before['currency']),
+              'freshness_verified':mode=='live',
+              'testing_note':'真实测试未核实刷新完整性、币种及源日期时区，不能作为正式巡查或恢复证据。' if mode=='live_test' else None,
               'rule_version':sha256((core.CONFIG_DIR/'diagnostic_rules.yaml').read_bytes()).hexdigest()[:16],
               'applied_filters':applied,'unrestricted_filters':skipped,
               'query':req.model_dump(mode='json'),'unknown_rule_inputs':rule_unknowns(rows,req.anomaly_rules),'localization_limit':'已定位到 Product Profit 结果视图，尚未接入上游源表验证。'}
@@ -157,6 +162,8 @@ def query(req: AnomalyQueryRequest, mode='demo'):
 
 
 def evaluate_plan(plan,start,end):
+    if plan.get('mode','demo') not in {'demo','live'}:
+        raise ValueError('真实数据测试模式不能用于定时巡查。')
     rules=plan.get('rules',[])
     if not rules: raise ValueError('巡查计划必须启用至少一条规则')
     if plan.get('mode')=='live' and not plan.get('rules_confirmed',False):

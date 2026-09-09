@@ -14,3 +14,14 @@ def test_overview_and_demo_scan(tmp_path,monkeypatch):
     assert not app.exception
     next(b for b in app.button if b.label=='执行查询与检查').click().run(timeout=20)
     assert not app.exception
+
+
+def test_manual_live_mode_only_exposes_query(tmp_path,monkeypatch):
+    from pathlib import Path
+    monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'test.sqlite3'))
+    app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
+    app.selectbox[0].set_value('live_test').run()
+    assert not app.exception
+    assert app.radio[0].options==['业务问题定位']
+    next(b for b in app.button if b.label=='执行查询与检查').click().run()
+    assert any('店铺' in e.value for e in app.error)
