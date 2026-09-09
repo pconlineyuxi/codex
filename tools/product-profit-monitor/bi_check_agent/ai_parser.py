@@ -10,6 +10,7 @@ from bi_check_agent.parser_schema import (
     ALLOWED_AGGREGATION_DIMENSIONS,
     ANOMALY_RULES,
     FILTER_FIELDS,
+    RULE_ALIASES,
     default_parser_result,
     sanitize_parser_result,
 )
@@ -64,6 +65,13 @@ def _merge_rule_overrides(description: str, parsed: dict[str, Any]) -> dict[str,
                 parsed[key].append(item)
     if parsed.get("start_date") and parsed.get("end_date"):
         parsed["missing_required_fields"] = [f for f in parsed.get("missing_required_fields", []) if f not in {"start_date", "end_date"}]
+    if "zero_sales_with_units" in rule_result.get("anomaly_rules", []) and "售价" in description:
+        # Remove only the contradicted warning for this recognized expression;
+        # keep all other unsupported conditions visible for review.
+        for key in ["warnings", "unresolved_terms"]:
+            parsed[key] = [item for item in parsed.get(key, []) if not (
+                "售价" in str(item) and any(word in str(item) for word in ["不在", "不支持", "无法映射", "未支持", "未识别"])
+            )]
     # Deterministic parser owns query mode and required anomaly behavior.
     if rule_result.get("query_mode"):
         parsed["query_mode"] = rule_result["query_mode"]
@@ -95,6 +103,8 @@ Hard rules:
 - Empty filter arrays mean no restriction / all values.
 - Business filters apply to both type='order' and type='ad_daily'.
 - Only choose anomaly_rules from: {ANOMALY_RULES}
+- Supported business aliases: {RULE_ALIASES}
+- 售价为0/售价是0/售价等于零 maps to existing zero_sales_with_units (sales = 0 AND units != 0); this is supported. Explain that this rule checks sales amount with nonzero quantity, not price_unit alone.
 - Only choose aggregation_dimensions from: {ALLOWED_AGGREGATION_DIMENSIONS}
 - Only choose filter fields from: {FILTER_FIELDS}
 - If the user asks for normal data without anomaly language, keep anomaly_rules empty and do not add missing_required_fields for anomaly_rules.

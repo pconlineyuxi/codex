@@ -39,3 +39,26 @@ def test_ai_gets_current_date_and_wrong_year_is_overridden(monkeypatch):
 
 def test_year_rollover():
     assert parser_rules.parse_time_range('今年', date(2027,1,1))[:2] == (date(2027,1,1), date(2028,1,1))
+
+
+@pytest.mark.parametrize('phrase',['售价为0','售价为 0','售价是0','售价等于零','售价=0'])
+def test_zero_price_business_alias(phrase):
+    result=parser_rules.fallback_parse('查昨天'+phrase+'的数据，按SKU汇总')
+    assert 'zero_sales_with_units' in result['anomaly_rules']
+    assert any('sales = 0' in note and 'units != 0' in note for note in result['notes'])
+
+
+def test_recognized_rule_clears_only_its_false_warning():
+    result=ai_parser._merge_rule_overrides('查昨天售价为0的数据', {
+        'warnings':['售价为0不在允许的 anomaly_rules 列表中，无法映射。','未支持仓库筛选'],
+        'unresolved_terms':['售价为0无法映射','仓库'],
+        'missing_required_fields':['anomaly_rules'],
+    })
+    assert result['anomaly_rules']==['zero_sales_with_units']
+    assert result['warnings']==['未支持仓库筛选']
+    assert result['unresolved_terms']==['仓库']
+    assert 'anomaly_rules' not in result['missing_required_fields']
+
+
+def test_nonzero_price_is_not_zero_price_rule():
+    assert 'zero_sales_with_units' not in parser_rules.fallback_parse('售价为0.5')['anomaly_rules']

@@ -130,6 +130,8 @@ def extract_anomaly_rules(text: str):
         if any(alias.lower() in low for alias in aliases):
             rules.append(rule)
     compact = re.sub(r"\s+", "", low)
+    if re.search(r"售价(?:为|是|等于|=|：|:)?(?:0(?![\d.])|零)", compact):
+        rules.append("zero_sales_with_units")
     if re.search(r"units?(?:=|为|是)?0.*(?:sales|销售|销售额|price_subtotal).*?(?:不为|不是|!=|<>|大于|>|非)0", compact, flags=re.I) or re.search(r"(?:销量|数量)(?:=|为|是)?0.*(?:销售|销售额).*?(?:不为|不是|!=|<>|大于|>|非)0", compact, flags=re.I):
         rules.append("zero_units_with_sales")
     if re.search(r"(?:sales|销售|销售额|price_subtotal)(?:=|为|是)?0.*units?.*?(?:不为|不是|!=|<>|大于|>|非)0", compact, flags=re.I) or re.search(r"(?:销售|销售额)(?:=|为|是)?0.*(?:销量|数量).*?(?:不为|不是|!=|<>|大于|>|非)0", compact, flags=re.I):
@@ -192,6 +194,8 @@ def fallback_parse(description: str) -> dict:
     result["unresolved_terms"].extend(unresolved)
     rules, warnings = extract_anomaly_rules(text)
     result["anomaly_rules"] = rules
+    if 'zero_sales_with_units' in rules and '售价' in text:
+        result['notes'].append('“售价为0”按现有规则 zero_sales_with_units 检查：销售额 sales = 0 且数量 units != 0；不是单独检查 price_unit。')
     result["warnings"].extend(warnings)
     result["query_mode"] = infer_query_mode(text, rules)
     result["intent"] = result["query_mode"]
