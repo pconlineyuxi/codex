@@ -1,4 +1,4 @@
-from bi_check_agent.service import summarize_findings, without_order_samples
+from bi_check_agent.service import summarize_findings, without_order_samples, available_stores
 """Local Product Profit workbench; one shared engine for queries and monitoring."""
 from datetime import date, datetime, timedelta
 import json
@@ -99,7 +99,20 @@ def queries(mode):
     c1,c2,c3=st.columns(3)
     filters={}
     fields=[('sku','SKU'),('ir','IR'),('main_ir','Main IR'),('marketplace','平台'),('store','店铺'),('order_id','订单号')]
+    if mode!='demo':
+        if st.button('加载当前日期范围内的店铺选项'):
+            try:
+                with st.spinner('读取店铺名称…'):
+                    st.session_state['store_options']=available_stores(start,end)
+                if not st.session_state['store_options']: st.info('当前日期范围未找到店铺，可以留空查询全部范围。')
+            except Exception as exc: _err(exc)
+        st.caption('店铺可不选，留空查询全部店铺；可加载实际店铺名称后多选。')
     for idx,(key,label) in enumerate(fields):
+        if key=='store' and mode!='demo':
+            options=list(dict.fromkeys(st.session_state.get('store_options',[])+parsed.get('store',[])))
+            value=[c1,c2,c3][idx%3].multiselect('店铺（留空为全部）',options,default=parsed.get('store',[]),key=draft+key)
+            if value: filters[key]=value
+            continue
         value=[x.strip() for x in [c1,c2,c3][idx%3].text_input(label,', '.join(parsed.get(key,[])),key=draft+key).split(',') if x.strip()]
         if value:filters[key]=value
     with st.expander('更多已支持的业务筛选'):
@@ -241,17 +254,20 @@ def main():
         st.markdown('### PRODUCT PROFIT')
         st.caption('数据巡查与问题定位')
         mode=st.selectbox('数据模式',['demo','live_test','live'],index={'demo':0,'live_test':1,'live':2}.get(st.query_params.get('mode','demo'),0),format_func=lambda x:{'demo':'演示数据','live_test':'真实数据测试（只读）','live':'正式巡查数据（只读）'}[x])
-        sections=['业务问题定位'] if mode=='live_test' else ['巡查概览','业务问题定位','异常历史','巡查计划']
-        page=st.radio('工作区',sections,index=2 if st.query_params.get('incident') and mode!='live_test' else 0)
+        sections=['巡查概览','业务问题定位','异常历史','巡查计划']
+        page=st.radio('工作区',sections,index=2 if st.query_params.get('incident') else (1 if mode=='live_test' else 0))
         st.divider();st.caption('纽约时间 · 本地开发版')
         st.caption('演示与真实数据分别记录。所有异常都需要证据，不自动修复数据。')
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
     st.title('Product Profit 数据工作台')
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
-    elif mode=='live_test':st.warning('真实数据测试 · 单店铺、最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
+    elif mode=='live_test':st.warning('真实数据测试 · 店铺可多选或留空查询全部，最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
     else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
     store=MonitorStore(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3'))
-    if page=='巡查概览':overview(store,mode)
+    monitor_mode='live' if mode=='live_test' else mode
+    if mode=='live_test' and page!='业务问题定位':
+        st.info('这里展示真实巡查记录和计划。手动测试查询可直接使用；正式巡查执行前仍需确认数据刷新、币种和时区。')
+    if page=='巡查概览':overview(store,monitor_mode)
     elif page=='业务问题定位':queries(mode)
-    elif page=='异常历史':history(store,mode)
-    else:plans(store,mode)
+    elif page=='异常历史':history(store,monitor_mode)
+    else:plans(store,monitor_mode)

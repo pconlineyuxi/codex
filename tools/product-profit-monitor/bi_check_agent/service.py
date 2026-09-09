@@ -122,8 +122,6 @@ def rule_unknowns(rows, rules):
 def query(req: AnomalyQueryRequest, mode='demo'):
     if not req.aggregation_dimensions: raise ValueError('汇总维度不能为空，请至少选择一个汇总维度')
     if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
-    if mode=='live_test' and len(req.store)!=1:
-        raise ValueError('真实测试请选择一个店铺。')
     _,_,applied,skipped=core.build_order_line_sql(req)
     before=_contract(req.start_date,req.end_date) if mode=='live' else None
     frames=[]
@@ -253,3 +251,16 @@ def without_order_samples(value):
         return {k: without_order_samples(v) for k, v in value.items() if k != 'samples'}
     if isinstance(value, list): return [without_order_samples(v) for v in value]
     return value
+
+
+def available_stores(start, end):
+    """Read actual store names for the selected window, without order details."""
+    request = AnomalyQueryRequest(start_date=start, end_date=end)
+    core.build_where_clause(request)
+    frame = db.run_query(
+        "SELECT DISTINCT store FROM bi.ba_mv_profit_order_line_and_ad_info "
+        "WHERE date_order >= :start AND date_order < :end "
+        "AND store IS NOT NULL AND store <> '' ORDER BY store",
+        {'start': start, 'end': end},
+    )
+    return frame['store'].astype(str).tolist()
