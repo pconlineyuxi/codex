@@ -120,6 +120,7 @@ def rule_unknowns(rows, rules):
 
 
 def query(req: AnomalyQueryRequest, mode='demo'):
+    if not req.aggregation_dimensions: raise ValueError('汇总维度不能为空，请至少选择一个汇总维度')
     if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
     if mode=='live_test' and len(req.store)!=1:
         raise ValueError('真实测试请选择一个店铺。')
@@ -233,3 +234,22 @@ def decompose(previous, current):
             'difference':delta,'components':components,
             'reconciliation_error':round(delta-sum(x['contribution'] for x in components),2),
             'conclusion':'差异贡献是结果视图中的算术分解，尚不能据此确认上游根因。广告仅在所选汇总范围解释。'}
+
+
+def summarize_findings(anomalies, dimensions):
+    """Expose dimension/rule counts only, never underlying order records."""
+    if not dimensions: raise ValueError('汇总维度不能为空')
+    if anomalies.empty: return pd.DataFrame()
+    frame = core._prepare_date_dimensions(anomalies.copy())
+    columns = [core.AGGREGATION_DIMENSION_COLUMNS[d] for d in dimensions]
+    for column in columns:
+        if column not in frame: frame[column] = pd.NA
+    frame['anomaly_rules'] = frame['anomaly_rules'].str.split(', ')
+    return frame.explode('anomaly_rules').groupby(columns + ['anomaly_rules'], dropna=False).size().reset_index(name='规则命中样本数')
+
+
+def without_order_samples(value):
+    if isinstance(value, dict):
+        return {k: without_order_samples(v) for k, v in value.items() if k != 'samples'}
+    if isinstance(value, list): return [without_order_samples(v) for v in value]
+    return value

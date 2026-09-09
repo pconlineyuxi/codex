@@ -1,3 +1,4 @@
+from bi_check_agent.service import summarize_findings, without_order_samples
 """Local Product Profit workbench; one shared engine for queries and monitoring."""
 from datetime import date, datetime, timedelta
 import json
@@ -113,10 +114,11 @@ def queries(mode):
                 format_func=lambda x:'是' if x else '否',key=draft+key)
             if selected:filters[key]=selected
     dims=st.multiselect('汇总维度',['main_ir','ir','sku','marketplace','store','day','week','month'],default=parsed.get('aggregation_dimensions') or ['marketplace','store','sku'])
+    if not dims: st.warning('汇总维度不能为空，请至少选择一个汇总维度。')
     rules=st.multiselect('检查规则（留空只查询）',list(RULE_LABELS),default=parsed.get('anomaly_rules',[]),format_func=RULE_LABELS.get)
     unresolved=parsed.get('unresolved_terms',[]) or parsed.get('unsupported_filters',{})
     accepted=st.checkbox('我已核对未识别内容，并确认以下范围完整表达本次问题',value=False) if unresolved else True
-    if st.button('执行查询与检查',type='primary',disabled=not accepted):
+    if st.button('执行查询与检查',type='primary',disabled=not accepted or not dims):
         try:
             request=AnomalyQueryRequest(start_date=start,end_date=end,aggregation_dimensions=dims,anomaly_rules=rules,**filters)
             with st.spinner('读取数据并核对规则…'):result=query(request,mode)
@@ -135,22 +137,23 @@ def queries(mode):
         if result['anomalies'].empty:st.info('未命中所选规则；未选规则或无数据时不代表数据正确。')
         else:
             st.markdown('**疑似异常与经营信号**')
-            st.dataframe(result['anomalies'],width='stretch',hide_index=True)
-            _csv('下载异常样本',result['anomalies'],'profit-findings.csv')
+            summary=summarize_findings(result['anomalies'],result['evidence']['query']['aggregation_dimensions'])
+            st.dataframe(summary,width='stretch',hide_index=True)
+            _csv('下载异常汇总',summary,'profit-findings-summary.csv')
         st.info(result['evidence']['localization_limit'])
-        with st.expander('查询凭据与来源样本'):
-            st.json(result['evidence']);st.dataframe(result['rows'].head(200),hide_index=True)
+        with st.expander('查询凭据'):
+            st.json(result['evidence'])
     st.divider()
     st.markdown('**两个时期的利润差异分解**')
     st.caption('复用上面的业务范围。演示时选择 DEMO-HEALTHY 或 DEMO-SHIP；DEMO-COST 会因成本缺失阻止完整归因。')
     c1,c2=st.columns(2)
     prev_start=c1.date_input('对比期开始',_now()-timedelta(days=14))
     prev_end=c2.date_input('对比期结束（不包含）',_now()-timedelta(days=7))
-    if st.button('比较利润变化',disabled=not accepted):
+    if st.button('比较利润变化',disabled=not accepted or not dims):
         try:
             with st.spinner('按同一口径比较两个时期…'):
-                a=query(AnomalyQueryRequest(start_date=prev_start,end_date=prev_end,**filters),mode)
-                b=query(AnomalyQueryRequest(start_date=start,end_date=end,**filters),mode)
+                a=query(AnomalyQueryRequest(start_date=prev_start,end_date=prev_end,aggregation_dimensions=dims,**filters),mode)
+                b=query(AnomalyQueryRequest(start_date=start,end_date=end,aggregation_dimensions=dims,**filters),mode)
                 if a['evidence']['currency']!=b['evidence']['currency']:raise ValueError('两个时期币种不一致，不能直接比较。')
                 if mode=='live' and a['evidence']['snapshot']!=b['evidence']['snapshot']:raise ValueError('两个时期读取时刷新状态改变，请重新比较。')
                 report=decompose(a['rows'],b['rows'])
@@ -173,7 +176,7 @@ def history(store,mode):
     desired=st.query_params.get('incident')
     selected=st.selectbox('选择异常',ids,index=ids.index(desired) if desired in ids else 0,
         format_func=lambda x:f"{RULE_LABELS.get(by[x]['rule'],by[x]['rule'])} · {by[x]['object']} · {by[x]['window_start']}")
-    detail=store.incident(selected)
+    detail=without_order_samples(store.incident(selected))
     st.write('状态：'+('待核查' if detail['status']=='open' else '已恢复'))
     st.json(detail.get('evidence',{}))
     st.markdown('**检查历史**');st.json(detail.get('history',[]))

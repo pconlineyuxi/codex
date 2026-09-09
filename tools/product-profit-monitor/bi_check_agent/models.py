@@ -60,7 +60,9 @@ class AnomalyQueryRequest(BaseModel):
     @classmethod
     def validate_aggregation_dimensions(cls, values: list[str]) -> list[str]:
         cleaned = []
-        for value in values or ["main_ir"]:
+        if not values:
+            raise ValueError("汇总维度不能为空，请至少选择一个汇总维度")
+        for value in values:
             normalized = str(value).strip().lower().replace("market_place", "marketplace").replace("market place", "marketplace")
             if normalized not in ALLOWED_AGGREGATION_DIMENSIONS:
                 raise ValueError(f"unsupported aggregation dimension: {value}")

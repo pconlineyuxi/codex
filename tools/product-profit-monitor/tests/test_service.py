@@ -222,3 +222,24 @@ def test_full_leap_year_query_limit(monkeypatch):
     with pytest.raises(ReaderReached): service.query(request, 'live_test')
     too_long = request.model_copy(update={'end_date':request.end_date+timedelta(days=1)})
     with pytest.raises(ValueError, match='366'): service.query(too_long, 'live_test')
+
+
+def test_empty_dimensions_rejected_before_read(monkeypatch):
+    from bi_check_agent import service
+    with pytest.raises(ValueError, match='汇总维度不能为空'):
+        req(aggregation_dimensions=[])
+    request=req().model_copy(update={'aggregation_dimensions':[]})
+    with pytest.raises(ValueError, match='汇总维度不能为空'):
+        service.query(request)
+
+
+def test_findings_output_contains_only_grouped_counts():
+    from bi_check_agent.service import summarize_findings, without_order_samples
+    rows=pd.DataFrame([
+        {'sku':'A','order_name':'private-1','sales':10,'anomaly_rules':'negative_units, missing_product_cost'},
+        {'sku':'A','order_name':'private-2','sales':20,'anomaly_rules':'missing_product_cost'},
+    ])
+    result=summarize_findings(rows,['sku'])
+    assert set(result.columns)=={'sku','anomaly_rules','规则命中样本数'}
+    assert result.set_index('anomaly_rules').loc['missing_product_cost','规则命中样本数']==2
+    assert without_order_samples({'history':[{'evidence':{'samples':[{'order_name':'private'}], 'count':2}}]})=={'history':[{'evidence':{'count':2}}]}
