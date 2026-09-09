@@ -81,3 +81,24 @@ def test_api_error_is_sanitized(monkeypatch):
     monkeypatch.setattr(openai,'OpenAI',fail)
     with pytest.raises(RuntimeError,match='已有对话均保留') as exc:analysis.answer(snapshot(),'为何下降？')
     assert 'secret-credential' not in str(exc.value)
+
+
+@pytest.mark.parametrize('old,new,expected',[(100,120,20),(100,80,-20),(100,100,0),(0,100,None),(0,0,None),(-100,-50,-50)])
+def test_amount_change_percent(old,new,expected):
+    assert service.amount_change_percent(old,new)==expected
+
+
+def test_percentage_is_amount_change_not_profit_contribution():
+    snap=snapshot()
+    ctx=analysis.context_for(snap,'费用变化百分比？')
+    for row in ctx['components']:
+        assert row['change_percent']==service.amount_change_percent(row['previous'],row['current'])
+    # A cost decrease is a negative amount change but a positive profit contribution.
+    import pandas as pd
+    before=service.demo_rows(requests()[0])
+    after=before.copy()
+    after['shipping_fee']=after['shipping_fee']*0.5
+    report=service.decompose(before,after)
+    shipping=next(c for c in report['components'] if c['item']=='运费')
+    assert shipping['change_percent']==-50
+    assert shipping['contribution']>0

@@ -217,6 +217,11 @@ def evaluate_plan(plan,start,end):
     return {'findings':list(findings.values()),'evidence':result['evidence']}
 
 
+def amount_change_percent(previous, current):
+    # Percentage change of the amount itself, not its signed profit contribution.
+    return None if previous == 0 else (current - previous) / previous * 100
+
+
 def decompose(previous, current):
     metrics=[('销售额','gross_sales',1),('促销','promo_cost',-1),('产品与改装成本','order_cost_total',-1),
              ('佣金','commission',-1),('广告','ad_spend',-1),('运费','shipping_fee',-1)]
@@ -227,7 +232,7 @@ def decompose(previous, current):
             if column not in d or not d[column].notna().all():
                 raise ValueError(f'{label}存在缺失或不可解析值，不能给出完整利润归因；请先检查缺失成本等规则。')
         old=float(a[column].sum());new=float(b[column].sum())
-        components.append({'item':label,'previous':old,'current':new,'contribution':round(sign*(new-old),2)})
+        components.append({'item':label,'previous':old,'current':new,'contribution':round(sign*(new-old),2),'change_percent':amount_change_percent(old,new)})
     oldprofit=sum(sign*float(a[col].sum()) for _,col,sign in metrics)
     newprofit=sum(sign*float(b[col].sum()) for _,col,sign in metrics)
     delta=round(newprofit-oldprofit,2)

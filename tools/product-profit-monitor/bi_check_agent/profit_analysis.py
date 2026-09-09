@@ -72,7 +72,7 @@ def context_for(snapshot, question, history=(), limit=160):
             candidates.append((exact, profit, {'evidence_id':f'{period}-{idx+1}', 'period':name, **{k:v for k,v in row.items() if k in allowed_columns}}))
     candidates.sort(key=lambda r:(r[0],r[1]),reverse=True)
     chosen = [r[2] for r in candidates[:limit]]
-    components = [dict(c, evidence_id=f'component-{i+1}') for i,c in enumerate(snapshot['report']['components'])]
+    components = [dict(c, change_percent=service.amount_change_percent(c['previous'],c['current']), evidence_id=f'component-{i+1}') for i,c in enumerate(snapshot['report']['components'])]
     # Only allowlisted aggregates/metadata reach the model, no env/config/raw rows.
     return {
         'analysis_id': snapshot['id'], 'mode':snapshot['mode'], 'currency':snapshot['currency'],
@@ -85,6 +85,7 @@ def context_for(snapshot, question, history=(), limit=160):
             '利润=销售额(gross_sales)-促销-产品与改装成本-佣金-广告-运费。汇总表 Sales 为扣促销后销售额，不能再扣一次促销。',
             '这是两期金额的算术差异贡献，不能证明上游根因、营销效果或录入错误。',
             '两个时期可能天数不同，比较总额时必须提示；不能把缺失数据当作零。',
+            'change_percent 是金额变化百分比，单位为百分数：(本期金额-对比期金额)/对比期金额*100，不是利润贡献占比。对比期为零时为 null；负基数时不能用百分比符号直接判断改善或恶化。',
             snapshot['report']['conclusion'],
             snapshot['current_evidence'].get('testing_note') or '以本次查询凭据为准。',
         ],

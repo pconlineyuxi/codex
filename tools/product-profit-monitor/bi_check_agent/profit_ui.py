@@ -9,6 +9,7 @@ import streamlit as st
 
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent import profit_analysis as analysis
+from bi_check_agent.service import amount_change_percent
 
 
 def render(mode, business_filters, csv, error):
@@ -88,8 +89,12 @@ def render(mode, business_filters, csv, error):
         direction='增加' if report['difference']>=0 else '减少'
         st.write(f"本期利润比对比期{direction} {abs(report['difference']):,.2f}；按绝对金额，影响最大的是{biggest['item']}，对利润变化的贡献为 {biggest['contribution']:+,.2f}。")
         frame=pd.DataFrame(report['components']).rename(columns={'item':'项目','previous':'对比期金额','current':'本期金额','contribution':'对利润变化的贡献'})
+        frame['金额变化百分比']=[amount_change_percent(c['previous'],c['current']) for c in report['components']]
+        frame=frame.drop(columns=['change_percent'],errors='ignore')
+        frame['金额变化百分比']=frame['金额变化百分比'].map(lambda x:'—' if pd.isna(x) else f'{x:+.2f}%')
         st.bar_chart(frame.set_index('项目')['对利润变化的贡献'],color='#0f766e')
         st.dataframe(frame,width='stretch',hide_index=True)
+        st.caption('金额变化百分比 =（本期金额－对比期金额）÷对比期金额；对比期为 0 时显示 —。负基数时请结合金额判断，不用百分比符号判断改善或恶化。')
         st.caption('正值增加利润，负值减少利润。销售额行是扣促销前金额；利润已扣促销、产品与改装成本、佣金、广告和运费。')
         st.caption(report['conclusion'])
         if snapshot['current_evidence'].get('testing_note'): st.info(snapshot['current_evidence']['testing_note'])
