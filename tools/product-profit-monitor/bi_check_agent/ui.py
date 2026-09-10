@@ -47,6 +47,8 @@ def manual_scan(store, mode):
     end=right.date_input('巡查结束日期（不包含）',_now())
     st.caption('复用所选计划的业务筛选；临时检查覆盖全部店铺。手动触发不启用后台计划或发送通知。')
     if not rules or not dims: st.warning('请至少选择一条规则和一个汇总维度。')
+    filters={**(plan or {}).get('filters',{}),'aggregation_dimensions':dims}
+    signature=json.dumps([mode,selected,str(start),str(end),rules,filters],sort_keys=True)
     if st.button('立即巡查',type='primary',disabled=not rules or not dims):
         try:
             filters={**(plan or {}).get('filters',{}),'aggregation_dimensions':dims}
@@ -61,9 +63,16 @@ def manual_scan(store, mode):
                 folder=Path(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3')).parent/'manual-scans'
                 folder.mkdir(parents=True,exist_ok=True)
                 (folder/(record['id']+'.json')).write_text(json.dumps(record,ensure_ascii=False,default=str))
+                from bi_check_agent.profit_analysis import scan_snapshot
                 st.session_state['manual_scan_result']=(mode,record)
+                st.session_state['manual_scan_snapshot']=scan_snapshot(record,request,result)
+                st.session_state['manual_scan_signature']=signature
+                st.session_state['manual_scan_failed']=False
+                st.session_state['manual_scan_chat']=[]
             st.success('手动巡查完成，已保存独立检查记录；未更新正式异常恢复状态或发送通知。')
-        except Exception as exc:_err(exc)
+        except Exception as exc:
+            st.session_state['manual_scan_failed']=True
+            _err(exc)
     cached=st.session_state.get('manual_scan_result')
     if cached and cached[0]==mode:
         record=cached[1]
@@ -72,6 +81,42 @@ def manual_scan(store, mode):
         if frame.empty: st.info('所选规则未命中；数据完整性仍以查询凭据为准。')
         else: st.dataframe(frame,width='stretch',hide_index=True)
         st.download_button('下载手动巡查记录',json.dumps(record,ensure_ascii=False,indent=2,default=str),'manual-scan.json','application/json')
+        scan_questions(record,mode,signature)
+
+
+def scan_questions(record,mode,signature):
+    from bi_check_agent import profit_analysis
+    from bi_check_agent.source_analysis import public_evidence
+    st.markdown('**就本次巡查继续提问**')
+    snapshot=st.session_state.get('manual_scan_snapshot')
+    ready=snapshot and snapshot['id']==record['id'] and snapshot['mode']==mode
+    stale=signature!=st.session_state.get('manual_scan_signature') or st.session_state.get('manual_scan_failed',False)
+    if not ready:
+        st.info('这份旧巡查记录没有保留源数据，请点击“立即巡查”重新运行后再提问。')
+    elif stale:
+        st.warning('巡查条件已变化或重新巡查未完成。下方保留旧结果，请重新巡查后继续提问。')
+    else:
+        st.caption(f"基于 {record['evidence']['start']} 至 {record['evidence']['end']}（结束日不含）的 {len(snapshot['_source_frames']['current'])} 条筛选后源记录分析；无需进行利润对比，也不要求成本字段完整。")
+    chat=st.session_state.setdefault('manual_scan_chat',[])
+    if chat and st.button('清空巡查对话'):
+        st.session_state['manual_scan_chat']=[]
+        chat=[]
+    for item in chat:
+        with st.chat_message(item['role']):
+            st.markdown(item['content'])
+            if item.get('evidence'):
+                with st.expander('查看巡查问答依据'):st.json(public_evidence(item['evidence']))
+    question=st.chat_input('例如：成本缺失集中在哪些 SKU？有多少条记录同时命中多个规则？',key='manual_scan_question',disabled=not ready or stale)
+    if question:
+        with st.chat_message('user'):st.markdown(question)
+        try:
+            with st.chat_message('assistant'):
+                with st.spinner('分析本次巡查的源数据…'):
+                    reply=profit_analysis.answer(snapshot,question,chat)
+                st.markdown(reply['content'])
+                with st.expander('查看巡查问答依据'):st.json(public_evidence(reply['evidence']))
+            chat.extend([{'role':'user','content':question},{'role':'assistant',**reply}])
+        except Exception as exc:_err(exc)
 
 
 def overview(store, mode):

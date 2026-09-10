@@ -56,8 +56,30 @@ def compare(current: AnomalyQueryRequest, previous: AnomalyQueryRequest, mode, p
     }
 
 
+def scan_snapshot(record, request, result):
+    return {'id':record['id'],'kind':'scan','mode':record['evidence']['mode'],
+            'currency':record['evidence']['currency'],'current_request':request.model_dump(mode='json'),
+            'current_evidence':record['evidence'],'rule_findings':record['summary'],
+            '_source_frames':{'current':result['rows']}}
+
+
 def context_for(snapshot, question, history=()):
     frames=source_frames(snapshot)
+    if snapshot.get('kind')=='scan':
+        return {
+            'analysis_id':snapshot['id'],'kind':'single_period_scan','mode':snapshot['mode'],'currency':snapshot['currency'],
+            'periods':{'current':{'start':snapshot['current_request']['start_date'],'end_exclusive':snapshot['current_request']['end_date'],'source_record_count':len(frames['current'])}},
+            'scope':{k:v for k,v in snapshot['current_request'].items() if k!='order_id' and v},
+            'available_fields':COLUMNS,
+            'rule_definitions':service.core.load_yaml('diagnostic_rules.yaml'),
+            'rule_findings':snapshot['rule_findings'][:100],
+            'rule_findings_coverage':{'total':len(snapshot['rule_findings']),'included':min(100,len(snapshot['rule_findings']))},
+            'limitations':['只有本次巡查时期，没有对比期；请使用 current 进行分析，不能虚构两期变化。',
+                '规则命中不等于已确认错误；请对完整源记录验证追问，不把汇总样本数量当作全部源数据。',
+                'profit=gross_sales-promo_cost-order_cost_total-commission-ad_spend-shipping_fee；sales 已扣促销。',
+                '原始行来自 Product Profit 结果视图，不代表上游系统根因已验证。',
+                snapshot['current_evidence'].get('testing_note') or '以巡查凭据为准。'],
+        }
     components = [dict(c, change_percent=service.amount_change_percent(c['previous'],c['current']), evidence_id=f'component-{i+1}') for i,c in enumerate(snapshot['report']['components'])]
     return {
         'analysis_id':snapshot['id'], 'mode':snapshot['mode'], 'currency':snapshot['currency'],

@@ -56,7 +56,7 @@ class AnalysisRequest(BaseModel):
 
 def source_frames(snapshot):
     frames = snapshot.get('_source_frames')
-    if not frames or set(frames) != {'previous','current'}:
+    if not frames or set(frames) not in ({'previous','current'}, {'current'}):
         raise ValueError('这份旧分析尚未保留筛选后的源数据，请重新点击“开始利润分析”后再提问。')
     return frames
 
@@ -133,6 +133,10 @@ def analyze(snapshot, arguments):
     request=AnalysisRequest.model_validate(arguments)
     frames=source_frames(snapshot)
     periods=['previous','current'] if request.period=='both' or request.operation=='compare' else [request.period]
+    if request.operation=='compare' and set(frames)!={'previous','current'}:
+        raise ValueError('本次巡查只有一个时期，无法比较两期，请使用利润变化分析。')
+    if request.period=='both' and request.operation!='compare': periods=list(frames)
+    if any(p not in frames for p in periods): raise ValueError('本次巡查不包含请求的时期。')
     comparison_frames={}
     evidence={'operation':request.operation,'request':request.model_dump(mode='json'),'periods':{},
               'notes':['所有统计先遍历本次筛选范围内的全部源记录，再应用本次追问条件；返回条数上限只限制展示，不限制参与计算的源数据。',
