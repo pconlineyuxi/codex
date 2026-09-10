@@ -84,29 +84,30 @@ def manual_scan(store, mode):
         scan_questions(record,mode,signature)
 
 
-def scan_questions(record,mode,signature):
+def scan_questions(record,mode,signature,namespace='manual_scan',title='就本次巡查继续提问'):
     from bi_check_agent import profit_analysis
     from bi_check_agent.source_analysis import public_evidence
-    st.markdown('**就本次巡查继续提问**')
-    snapshot=st.session_state.get('manual_scan_snapshot')
+    st.markdown('**'+title+'**')
+    snapshot=st.session_state.get(namespace+'_snapshot')
     ready=snapshot and snapshot['id']==record['id'] and snapshot['mode']==mode
-    stale=signature!=st.session_state.get('manual_scan_signature') or st.session_state.get('manual_scan_failed',False)
+    stale=signature!=st.session_state.get(namespace+'_signature') or st.session_state.get(namespace+'_failed',False)
     if not ready:
         st.info('这份旧巡查记录没有保留源数据，请点击“立即巡查”重新运行后再提问。')
     elif stale:
         st.warning('巡查条件已变化或重新巡查未完成。下方保留旧结果，请重新巡查后继续提问。')
     else:
         st.caption(f"基于 {record['evidence']['start']} 至 {record['evidence']['end']}（结束日不含）的 {len(snapshot['_source_frames']['current'])} 条筛选后源记录分析；无需进行利润对比，也不要求成本字段完整。")
-    chat=st.session_state.setdefault('manual_scan_chat',[])
-    if chat and st.button('清空巡查对话'):
-        st.session_state['manual_scan_chat']=[]
+    chat=st.session_state.setdefault(namespace+'_chat',[])
+    if chat and st.button('清空本次对话',key=namespace+'_clear'):
+        st.session_state[namespace+'_chat']=[]
         chat=[]
     for item in chat:
         with st.chat_message(item['role']):
             st.markdown(item['content'])
             if item.get('evidence'):
                 with st.expander('查看巡查问答依据'):st.json(public_evidence(item['evidence']))
-    question=st.chat_input('例如：成本缺失集中在哪些 SKU？有多少条记录同时命中多个规则？',key='manual_scan_question',disabled=not ready or stale)
+    with st.container(border=True):
+        question=st.chat_input('例如：成本缺失集中在哪些 SKU？有多少条记录同时命中多个规则？',key=namespace+'_question',disabled=not ready or stale)
     if question:
         with st.chat_message('user'):st.markdown(question)
         try:
@@ -259,6 +260,30 @@ def queries(mode):
         st.info(result['evidence']['localization_limit'])
         with st.expander('查询凭据'):
             st.json(result['evidence'])
+        # Existing query sessions already retain source rows, so enable chat
+        # without forcing an additional database read.
+        import hashlib
+        from bi_check_agent.profit_analysis import scan_snapshot
+        query_id=hashlib.sha256(json.dumps(result['evidence'],sort_keys=True,default=str).encode()).hexdigest()
+        summary=summarize_findings(result['anomalies'],result['evidence']['query']['aggregation_dimensions'])
+        record={'id':query_id,'evidence':result['evidence'],'summary':records(summary)}
+        previous_snapshot=st.session_state.get('query_scan_snapshot',{})
+        if previous_snapshot.get('id')!=query_id:
+            saved_request=AnomalyQueryRequest.model_validate(result['evidence']['query'])
+            st.session_state['query_scan_snapshot']=scan_snapshot(record,saved_request,result)
+            st.session_state['query_scan_signature']=json.dumps(saved_request.model_dump(mode='json'),sort_keys=True)
+            st.session_state['query_scan_chat']=[]
+        try:
+            desired=AnomalyQueryRequest(start_date=start,end_date=end,aggregation_dimensions=dims,anomaly_rules=rules,**filters)
+            desired_signature=json.dumps(desired.model_dump(mode='json'),sort_keys=True) if accepted else 'unconfirmed'
+        except ValueError: desired_signature='invalid'
+        scan_questions(record,mode,desired_signature,namespace='query_scan',title='就本次查询与检查继续提问')
+    else:
+        with st.container(border=True):
+            st.markdown('**就本次查询与检查继续提问**')
+            st.caption('先执行上面的查询与检查，完成后即可在这里针对筛选后的源数据提问。')
+            st.chat_input('查询完成后，在这里输入问题',disabled=True,key='query_pending_question')
+
 
 
 def history(store,mode):
