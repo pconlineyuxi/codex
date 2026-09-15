@@ -77,6 +77,7 @@ def demo_rows(req):
                          product_cost_unit=0.,hardware_cost=0.,removed_hardware=0.,commission=0.,ad_spend=65.,shipping_fee=0.)
             result.append(r)
     d=pd.DataFrame(result)
+    d=d[d.main_ir.notna() & ~d.main_ir.isin(core.FIXED_EXCLUDED_MAIN_IR)]
     mapping=core.load_yaml('filter_mapping.yaml')['filters']
     for field,spec in mapping.items():
         values=getattr(req,field,[])
@@ -267,7 +268,7 @@ def available_business_options(start, end):
     core.build_where_clause(request)
     frame = db.run_query(
         "SELECT DISTINCT market_place, store FROM bi.ba_mv_profit_order_line_and_ad_info "
-        "WHERE date_order >= :start AND date_order < :end "
+        "WHERE date_order >= :start AND date_order < :end AND " + core.FIXED_MAIN_IR_SQL + " "
         "ORDER BY market_place, store",
         {'start': start, 'end': end},
     )

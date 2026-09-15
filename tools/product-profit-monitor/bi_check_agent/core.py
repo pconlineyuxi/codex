@@ -64,6 +64,10 @@ def _bind_list(params: dict[str, Any], prefix: str, values: list[Any]) -> list[s
     return keys
 
 
+FIXED_EXCLUDED_MAIN_IR = ('SHIPPING FEE', 'SHIPMENT DISCOUNT', 'GIFT WRAPPER FEE', 'PROMOTION DISCOUNT')
+FIXED_MAIN_IR_SQL = "main_ir NOT IN ('SHIPPING FEE', 'SHIPMENT DISCOUNT', 'GIFT WRAPPER FEE', 'PROMOTION DISCOUNT')"
+
+
 def build_where_clause(req: AnomalyQueryRequest) -> tuple[str, dict[str, Any], list[str], list[str]]:
     if any(req.unsupported_filters.values()):
         raise ValueError("包含不支持的筛选字段，请修正查询范围")
@@ -74,9 +78,11 @@ def build_where_clause(req: AnomalyQueryRequest) -> tuple[str, dict[str, Any], l
     if (req.end_date - req.start_date).days > max_days:
         raise ValueError(f"查询时间跨度超过 {max_days} 天，请缩小 Time range")
     base_clauses = ["date_order >= TO_TIMESTAMP(:start_date, 'YYYY-MM-DD HH24:MI:SS')", "date_order < TO_TIMESTAMP(:end_date, 'YYYY-MM-DD HH24:MI:SS')"]
+    base_clauses.append(FIXED_MAIN_IR_SQL)
     order_clauses = ["type = 'order'"]
     ads_clauses = ["type = 'ad_daily'"]
     applied = ["date_order 左闭右开", "type = order + ad_daily", "order/ad_daily 使用相同业务 filter"]
+    applied.append("固定排除：" + FIXED_MAIN_IR_SQL)
     skipped: list[str] = []
     req_dict = req.model_dump()
 

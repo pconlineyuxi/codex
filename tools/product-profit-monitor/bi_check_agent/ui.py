@@ -349,6 +349,14 @@ def plans(store,mode):
 
 def main():
     load_dotenv()
+    policy='fixed-main-ir-exclusions-v1'
+    if st.session_state.get('data_policy')!=policy:
+        # Old results and their source frames were read under a different scope.
+        for key in ['result','manual_scan_result','manual_scan_snapshot','manual_scan_chat','profit_snapshot','profit_chat','query_scan_snapshot','query_scan_chat']:
+            st.session_state.pop(key,None)
+        for key in list(st.session_state):
+            if key.endswith('business_options'): st.session_state.pop(key,None)
+        st.session_state['data_policy']=policy
     st.set_page_config(page_title='Product Profit · 数据巡查',page_icon='🔎',layout='wide')
     st.markdown('''<style>
     .stApp {background:#f6f8fb} h1,h2,h3 {color:#102c41}
@@ -366,6 +374,7 @@ def main():
         st.caption('演示与真实数据分别记录。所有异常都需要证据，不自动修复数据。')
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
     st.title('Product Profit 数据工作台')
+    st.caption('固定排除 main_ir：SHIPPING FEE、SHIPMENT DISCOUNT、GIFT WRAPPER FEE、PROMOTION DISCOUNT。按 SQL NOT IN 口径，main_ir 为空的记录也不纳入。')
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
     elif mode=='live_test':st.warning('真实数据测试 · 店铺可多选或留空查询全部，最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
     else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
