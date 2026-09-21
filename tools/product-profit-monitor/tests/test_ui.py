@@ -47,9 +47,9 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'state.sqlite3'))
     monkeypatch.setattr(ui,'available_business_options',lambda *a:[{'market_place':'Platform A','store':'Store A'},{'market_place':'Platform B','store':'Store B'}])
     seen=[]
-    def fake_query(request,mode):
+    def fake_query(request,mode,progress=None):
         seen.append(request.store)
-        return service.query(request,'demo')
+        return service.query(request,'demo',progress=progress)
     monkeypatch.setattr(ui,'query',fake_query)
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
     next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()
@@ -63,7 +63,8 @@ def test_store_options_and_all_store_query(tmp_path,monkeypatch):
     next(b for b in app.button if b.label=='执行查询与检查').click().run()
     assert seen[-1]==['Store A','Store B']
     next(m for m in app.multiselect if m.label=='平台（留空为全部）').set_value(['Platform A']).run()
-    assert next(m for m in app.multiselect if m.label=='店铺（留空为全部）').options==['Store A']
+    assert next(m for m in app.multiselect if m.label=='店铺（留空为全部）').value==['Store A','Store B']
+    assert any('已保留筛选' in w.value for w in app.warning)
     assert not app.exception
 
 
@@ -72,9 +73,9 @@ def test_manual_scan_runs_without_enabling_schedule(tmp_path,monkeypatch):
     from bi_check_agent import ui, service
     monkeypatch.setenv('PROFIT_STATE_DB',str(tmp_path/'state.sqlite3'))
     seen=[]
-    def fake_query(request,mode):
+    def fake_query(request,mode,progress=None):
         seen.append((request,mode))
-        return service.query(request,'demo')
+        return service.query(request,'demo',progress=progress)
     monkeypatch.setattr(ui,'query',fake_query)
     app=AppTest.from_file(str(Path(__file__).resolve().parents[1]/'app.py')).run()
     next(s for s in app.selectbox if s.label=='数据模式').set_value('live_test').run()

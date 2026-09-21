@@ -11,11 +11,12 @@ import pandas as pd
 
 from bi_check_agent import core, db
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.versioning import rule_source_version
 
 RULE_LABELS = {
     'zero_units_with_sales': '数量为零但有销售额', 'zero_sales_with_units': '有数量但销售额为零',
     'negative_units': '负数量待核查', 'negative_sales': '负销售额待核查',
-    'negative_shipping_fee': '负运费待核查', 'negative_promotion': '负促销金额待核查',
+    'negative_shipping_fee': '负运费待核查', 'negative_promotion': '原始促销金额为负（符号待核查）',
     'negative_commission': '负佣金待核查', 'negative_ad_spend': '负广告费待核查',
     'missing_product_cost': '产品成本缺失或非正数', 'unit_cost_non_positive': '单件总成本非正数',
     'removed_hardware_abnormal': '拆件成本超过整机与改装成本',
@@ -64,7 +65,7 @@ def demo_rows(req):
             sales=1000.0 + (day.toordinal() % 3)*50
             r=dict(type='order',date_order=day.isoformat(),main_ir=sku,ir=sku,sku=sku,
                    follower='Demo Owner',market_place='Amazon',store='Demo US',
-                   order_id=f'DEMO-{day:%Y%m%d}-{i}',gross_sales=sales,promo_cost=20.0,
+                   order_id=f'DEMO-{day:%Y%m%d}-{i}',gross_sales=sales,raw_promotion=20.0,promo_cost=20.0,
                    sales=sales-20,units=2.0,product_cost_unit=300.0,hardware_cost=20.0,
                    removed_hardware=0.0,commission=100.0,ad_spend=0.0,shipping_fee=25.0,
                    has_product_cost=True,has_sale_price=True,category='Laptop',brand='Demo')
@@ -73,7 +74,7 @@ def demo_rows(req):
             if sku=='DEMO-SHIP':
                 r['shipping_fee']=600.0
             if sku=='DEMO-ADS':
-                r.update(type='ad_daily',order_id=None,gross_sales=0.,promo_cost=0.,sales=0.,units=0.,
+                r.update(type='ad_daily',order_id=None,gross_sales=0.,raw_promotion=0.,promo_cost=0.,sales=0.,units=0.,
                          product_cost_unit=0.,hardware_cost=0.,removed_hardware=0.,commission=0.,ad_spend=65.,shipping_fee=0.)
             result.append(r)
     d=pd.DataFrame(result)
@@ -99,7 +100,7 @@ def rule_unknowns(rows, rules):
     required={
         'zero_units_with_sales':['units','sales'], 'zero_sales_with_units':['units','sales'],
         'negative_units':['units'], 'negative_sales':['sales'], 'negative_shipping_fee':['shipping_fee'],
-        'negative_promotion':['promo_cost'], 'negative_commission':['commission'],
+        'negative_promotion':['raw_promotion'], 'negative_commission':['commission'],
         'unit_cost_non_positive':['product_cost_unit','hardware_cost','removed_hardware'],
         'removed_hardware_abnormal':['product_cost_unit','hardware_cost','removed_hardware'],
         'shipping_cost_ratio_high':['sales','shipping_fee'], 'unit_shipping_fee_high':['units','shipping_fee'],
@@ -126,6 +127,11 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
     _,_,applied,skipped=core.build_order_line_sql(req)
     before=_contract(req.start_date,req.end_date) if mode=='live' else None
     frames=[]
+    total_rows=0
+    total_bytes=0
+    total_cap=int(os.getenv('MAX_QUERY_TOTAL_ROWS','500000'))
+    byte_cap=int(os.getenv('MAX_QUERY_MEMORY_MB','256'))*1024*1024
+    if total_cap < 1 or byte_cap < 1: raise ValueError('查询累计资源上限必须大于零')
     cap=int(os.getenv('MAX_RESULT_ROWS','50000'))
     if cap < 1: raise ValueError('MAX_RESULT_ROWS 必须大于零')
     if mode=='demo':
@@ -139,6 +145,10 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
             rows=db.run_query(sql,params)
             if len(rows)>=params['max_rows']:
                 raise RuntimeError('单日数据超过读取上限，本次检查不完整。请按店铺或平台缩小计划范围。')
+            total_rows+=len(rows)
+            total_bytes+=int(rows.memory_usage(index=True,deep=True).sum())
+            if total_rows>total_cap or total_bytes>byte_cap:
+                raise RuntimeError('查询超过累计数据量或内存上限，本次未生成结果。请缩小日期、店铺或平台范围。')
             frames.append(rows)
             if progress: progress(offset+1,(req.end_date-req.start_date).days)
         if mode=='live':
@@ -157,7 +167,7 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
               'currency':'DEMO USD' if mode=='demo' else ('源金额（币种待核对）' if mode=='live_test' else before['currency']),
               'freshness_verified':mode=='live',
               'testing_note':'真实测试未核实刷新完整性、币种及源日期时区，不能作为正式巡查或恢复证据。' if mode=='live_test' else None,
-              'rule_version':sha256((core.CONFIG_DIR/'diagnostic_rules.yaml').read_bytes()).hexdigest()[:16],
+              'rule_version':rule_source_version(),
               'applied_filters':applied,'unrestricted_filters':skipped,
               'query':req.model_dump(mode='json'),'unknown_rule_inputs':rule_unknowns(rows,req.anomaly_rules),'localization_limit':'已定位到 Product Profit 结果视图，尚未接入上游源表验证。'}
     return {'rows':rows,'aggregate':core.aggregate_product(rows,req.aggregation_dimensions),

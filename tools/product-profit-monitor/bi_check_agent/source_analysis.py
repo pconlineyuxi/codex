@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 BUSINESS = ['type','date_order','day','week','month','market_place','store','sku','ir','main_ir']
 ADDITIVE = ['gross_sales','promo_cost','sales','units','order_cost_total','commission','ad_spend','shipping_fee','profit']
-UNIT = ['product_cost_unit','hardware_cost','removed_hardware','unit_cost','shipping_ratio','unit_shipping_fee','net_unit_sales']
+UNIT = ['raw_promotion','product_cost_unit','hardware_cost','removed_hardware','unit_cost','shipping_ratio','unit_shipping_fee','net_unit_sales']
 COLUMNS = BUSINESS + ADDITIVE + UNIT
 
 

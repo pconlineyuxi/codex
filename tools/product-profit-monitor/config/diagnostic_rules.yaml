@@ -35,7 +35,7 @@ queryable_rules:
   negative_promotion:
     severity: P1
     level: line
-    description: Promotion is negative after dashboard sign normalization.
+    description: Raw promotion is negative; review the source sign convention, not an automatic error.
   negative_commission:
     severity: P1
     level: line

@@ -63,10 +63,10 @@ def test_answer_calls_source_tool_and_uses_history(monkeypatch):
     captured=[]
     def create(**kwargs):
         captured.append(dict(kwargs,messages=list(kwargs['messages'])))
-        if len(captured)==1:
+        if len(captured)%2==1:
             call=SimpleNamespace(id='call1',function=SimpleNamespace(name='analyze_filtered_source_data',arguments=json.dumps({'period':'both','operation':'statistics','measures':[{'field':'shipping_fee','statistic':'sum'}]})))
             return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=None,tool_calls=[call]))])
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='源数据运费统计见 [source-1]。',tool_calls=[]))])
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='源数据运费统计见 ['+json.loads(kwargs['messages'][-1]['content'])['evidence_id']+']。',tool_calls=[]))])
     monkeypatch.setattr(openai,'OpenAI',lambda **kw:SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create))))
     result=analysis.answer(snapshot(),'为什么？',[{'role':'user','content':'运费变了吗？'},{'role':'assistant','content':'旧回答'}])
     assert result['coverage']['basis']=='filtered_source_records'
@@ -77,6 +77,9 @@ def test_answer_calls_source_tool_and_uses_history(monkeypatch):
     tool=json.loads(captured[1]['messages'][-1]['content'])
     assert tool['periods']['current']['matched_record_count']>0
     assert 'fake-test-key' not in json.dumps(captured)
+    second=analysis.answer(snapshot(),'继续核查')
+    assert result['evidence']['answer_id']!=second['evidence']['answer_id']
+    assert result['evidence']['source_analyses'][0]['evidence_id']!=second['evidence']['source_analyses'][0]['evidence_id']
 
 
 def test_api_error_is_sanitized(monkeypatch):

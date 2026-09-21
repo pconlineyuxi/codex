@@ -54,7 +54,9 @@ def manual_scan(store, mode):
             filters={**(plan or {}).get('filters',{}),'aggregation_dimensions':dims}
             request=AnomalyQueryRequest(start_date=start,end_date=end,anomaly_rules=rules,**filters)
             with st.spinner('执行手动巡查…'):
-                result=query(request,mode)
+                progress=st.progress(0,text='准备读取数据…')
+                result=query(request,mode,progress=lambda done,total:progress.progress(done/total,text=f'已读取 {done}/{total} 天'))
+                progress.empty()
                 summary=summarize_findings(result['anomalies'],dims)
                 # Manual runs are isolated from formal recovery and notification state.
                 from pathlib import Path
@@ -122,6 +124,7 @@ def scan_questions(record,mode,signature,namespace='manual_scan',title='就本�
 
 def overview(store, mode):
     st.subheader('巡查概览')
+    st.caption('上方统计为计划巡查；下方手动巡查独立保存，可在本页继续提问。手动记录不计入计划异常历史。')
     st.caption('先确认检查是否完成，再看异常。没有检查记录不等于没有问题。')
     runs=[r for r in store.runs() if r.get('mode')==mode]
     incidents=[i for i in store.incidents() if i.get('mode')==mode]
@@ -179,7 +182,7 @@ def business_filters(mode,start,end,parsed,namespace="query",windows=None):
                     st.session_state[namespace+'business_options']=loaded
                 if not loaded['pairs']: st.info('当前日期范围未找到平台和店铺选项。')
             except Exception as exc: _err(exc)
-        st.caption('平台、店铺均可多选；留空不限制。修改日期后请重新加载选项，选择平台后店铺选项会相应更新。')
+        st.caption('平台、店铺均可多选；留空不限制。修改日期后请重新加载选项；已选条件会保留，不会自动扩大查询范围。')
     for idx,(key,label) in enumerate(fields):
         if key in {'marketplace','store'} and mode!='demo':
             pairs=loaded.get('pairs',[])
@@ -188,10 +191,12 @@ def business_filters(mode,start,end,parsed,namespace="query",windows=None):
             else:
                 platforms=filters.get('marketplace',[])
                 options=sorted({r['store'] for r in pairs if r.get('store') and (not platforms or r.get('market_place') in platforms)})
-            if not loaded: options=list(dict.fromkeys(options+parsed.get(key,[])))
-            defaults=[v for v in parsed.get(key,[]) if v in options]
-            option_key=hashlib.sha256(json.dumps(options,ensure_ascii=False).encode()).hexdigest()[:8]
-            value=[c1,c2,c3][idx%3].multiselect(label+'（留空为全部）',options,default=defaults,key=draft+window_key+key+option_key)
+            selection_key=draft+':'+mode+':'+key
+            remembered=st.session_state.get(selection_key,parsed.get(key,[]))
+            unavailable=[v for v in remembered if loaded and v not in options]
+            options=list(dict.fromkeys(options+remembered))
+            if unavailable: st.warning(label+'所选值不在当前可选范围中，已保留筛选，请核对：'+', '.join(unavailable))
+            value=[c1,c2,c3][idx%3].multiselect(label+'（留空为全部）',options,default=remembered,key=selection_key)
             if value: filters[key]=value
             continue
         value=[x.strip() for x in [c1,c2,c3][idx%3].text_input(label,', '.join(parsed.get(key,[])),key=draft+key).split(',') if x.strip()]
@@ -238,14 +243,20 @@ def queries(mode):
     if st.button('执行查询与检查',type='primary',disabled=not accepted or not dims):
         try:
             request=AnomalyQueryRequest(start_date=start,end_date=end,aggregation_dimensions=dims,anomaly_rules=rules,**filters)
-            with st.spinner('读取数据并核对规则…'):result=query(request,mode)
+            with st.spinner('读取数据并核对规则…'):
+                progress=st.progress(0,text='准备读取数据…')
+                result=query(request,mode,progress=lambda done,total:progress.progress(done/total,text=f'已读取 {done}/{total} 天'))
+                progress.empty()
             st.session_state['result']=(mode,result)
-        except Exception as exc:_err(exc)
+            st.session_state['query_scan_failed']=False
+        except Exception as exc:
+            st.session_state['query_scan_failed']=True
+            _err(exc)
     cached=st.session_state.get('result')
     if cached and cached[0]==mode:
         result=cached[1]
         st.divider()
-        st.markdown('**查询结果**')
+        st.markdown('**上次成功的查询结果**' if st.session_state.get('query_scan_failed') else '**查询结果**')
         st.caption(f"实际范围 {result['evidence']['start']} — {result['evidence']['end']} · {result['evidence']['row_count']} 条来源记录 · {result['evidence']['currency']}")
         st.dataframe(result['aggregate'],width='stretch',hide_index=True)
         _csv('下载聚合结果',result['aggregate'],'profit-summary.csv')
@@ -288,6 +299,7 @@ def queries(mode):
 
 def history(store,mode):
     st.subheader('异常证据与历史')
+    st.info('这里仅展示计划巡查的异常与恢复历史。手动巡查结果和对话在巡查概览，业务查询结果和对话在业务问题定位；当前对话随浏览器会话保留。')
     items=[i for i in store.incidents() if i.get('mode')==mode]
     if not items:
         st.info('当前模式暂无异常记录。请先运行巡查。');return
@@ -337,7 +349,8 @@ def plans(store,mode):
             store.save_plan(payload);st.success('计划已保存；后台进程运行时会按计划执行。')
         except Exception as exc:_err(exc)
     if current:
-        if st.button('立即检查昨天的数据'):
+        st.caption('此操作更新计划异常状态；如需检查后继续问 AI，请到巡查概览选择该计划进行手动巡查。')
+        if st.button('执行计划检查（写入异常历史）'):
             result=store.run(current,str(_now()-timedelta(days=1)),str(_now()),evaluate_plan)
             if result['status']=='succeeded':st.success('检查完成，请到异常历史查看证据。')
             else:st.error(result.get('error','检查未完成'))
@@ -349,7 +362,8 @@ def plans(store,mode):
 
 def main():
     load_dotenv()
-    policy='fixed-main-ir-exclusions-v1'
+    from bi_check_agent.versioning import rule_source_version
+    policy=rule_source_version()
     if st.session_state.get('data_policy')!=policy:
         # Old results and their source frames were read under a different scope.
         for key in ['result','manual_scan_result','manual_scan_snapshot','manual_scan_chat','profit_snapshot','profit_chat','query_scan_snapshot','query_scan_chat']:
@@ -374,6 +388,7 @@ def main():
         st.caption('演示与真实数据分别记录。所有异常都需要证据，不自动修复数据。')
         st.link_button('GitHub 项目','https://github.com/pconlineyuxi/codex')
     st.title('Product Profit 数据工作台')
+    st.caption('数据口径：Sales 为扣促销后的销售额，不是原始售价；促销成本取绝对值。产品成本缺失规则包含空值、零和负数；单件总成本为产品成本 + 改装成本 − 拆件成本。AI 分析的是结果视图筛选后、汇总前的记录，部分字段已转换。')
     st.caption('固定排除 main_ir：SHIPPING FEE、SHIPMENT DISCOUNT、GIFT WRAPPER FEE、PROMOTION DISCOUNT。按 SQL NOT IN 口径，main_ir 为空的记录也不纳入。')
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
     elif mode=='live_test':st.warning('真实数据测试 · 店铺可多选或留空查询全部，最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')

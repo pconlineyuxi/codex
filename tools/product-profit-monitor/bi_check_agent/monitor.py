@@ -22,8 +22,7 @@ def _key(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
-def rule_source_version():
-    return hashlib.sha256((Path(__file__).resolve().parents[1] / 'config' / 'diagnostic_rules.yaml').read_bytes()).hexdigest()
+from bi_check_agent.versioning import rule_source_version
 
 
 def scope_key(plan):
