@@ -257,7 +257,15 @@ def summarize_findings(anomalies, dimensions):
     """Expose dimension/rule counts only, never underlying order records."""
     if not dimensions: raise ValueError('汇总维度不能为空')
     if anomalies.empty: return pd.DataFrame()
-    frame = core._prepare_date_dimensions(anomalies.copy())
+    frame = anomalies.copy()
+    # Aggregate findings already carry a day but have no date_order. Do not
+    # erase their day when mixed with order-line findings in the same frame.
+    if 'day' in frame:
+        original_day = frame['day'].copy()
+        frame = core._prepare_date_dimensions(frame)
+        frame['day'] = frame['day'].fillna(original_day)
+    else:
+        frame = core._prepare_date_dimensions(frame)
     columns = [core.AGGREGATION_DIMENSION_COLUMNS[d] for d in dimensions]
     for column in columns:
         if column not in frame: frame[column] = pd.NA

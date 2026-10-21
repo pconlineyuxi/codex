@@ -12,6 +12,7 @@ import tempfile
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 from dotenv import load_dotenv
 from bi_check_agent import core, service
 from bi_check_agent.models import AnomalyQueryRequest
@@ -22,6 +23,46 @@ DATA_RULES = {'zero_units_with_sales', 'zero_sales_with_units', 'missing_product
               'unit_cost_non_positive', 'removed_hardware_abnormal', 'profit_rate_with_ads_ship_high'}
 CORE_RULES = ['missing_product_cost', 'shipping_cost_ratio_high', 'ad_spend_without_sales']
 LIMITATION = '刷新完整性、源币种及源日期时区未核实；本次为只读核查，不判定数据通过或正式异常恢复。'
+SALES_RULES = {'zero_units_with_sales', 'zero_sales_with_units', 'negative_sales',
+               'shipping_cost_ratio_high', 'promotion_ratio_high', 'ad_spend_ratio_high',
+               'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}
+COST_RULES = {'missing_product_cost', 'unit_cost_non_positive', 'removed_hardware_abnormal',
+              'profit_rate_with_ads_ship_high'}
+MATURITY_NOTE = ('销售额在订单进入后补跑；成本在实际出库后的夜间批次写入。当前取数仅按订单/广告日期，'
+                 '未接入出库时间和补跑任务覆盖凭据，无法判断是否已到应有数据的时点。'
+                 '受影响规则仅保留条件命中观察，不据此告警；未命中也不能判为正常。')
+
+
+def maturity_reason(rule, mode):
+    if mode == 'demo':
+        return ''
+    reasons = []
+    if rule in SALES_RULES:
+        reasons.append('销售额补充任务完成且覆盖该订单的凭据未接入')
+    if rule in COST_RULES:
+        reasons.append('实际出库时间及覆盖该出库批次的成本写入凭据未接入')
+    if rule in {'ad_spend_ratio_high', 'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}:
+        reasons.append('广告批次完整性未核实；同日账面销售不是广告归因销售')
+    return '；'.join(reasons)
+
+
+def advertising_observation(rows, findings):
+    """Explain the unit of an ad hit without exposing order records."""
+    groups = [r for r in findings if r['anomaly_rules'] == 'ad_spend_without_sales']
+    columns = ['market_place', 'store', 'sku', 'day']
+    def key(row):
+        return tuple(None if pd.isna(row.get(c)) else str(row[c]) for c in columns)
+    order_counts = Counter()
+    if not rows.empty:
+        for row in rows.loc[rows.type == 'order', columns].to_dict('records'):
+            order_counts[key(row)] += 1
+    by_store = Counter((r.get('market_place'), r.get('store')) for r in groups)
+    no_orders = sum(order_counts[key(r)] == 0 for r in groups)
+    return {'group_count':len(groups), 'platform_count':len({r.get('market_place') for r in groups}),
+        'store_count':len(by_store), 'distinct_sku_count':len({r.get('sku') for r in groups}),
+        'no_matching_order_groups':no_orders, 'orders_present_zero_net_sales_groups':len(groups)-no_orders,
+        'by_platform_store':[{'platform':p,'store':s,'sku_day_groups':n} for (p,s),n in by_store.items()],
+        'interpretation':'分组单位是平台×店铺×SKU×日，不是平台数。无匹配订单仅指本次日期和固定筛选范围；零净销售不等于广告无转化。'}
 
 
 def previous_day(now=None):
@@ -47,21 +88,27 @@ def build_report(day, rules, mode='review', query_fn=None):
     definitions = core.load_yaml('diagnostic_rules.yaml')['queryable_rules']
     rule_summary = []
     for rule in rules:
+        pending_reason = maturity_reason(rule, mode)
         rule_summary.append({'rule':rule, 'label':service.RULE_LABELS[rule],
-            'category':'疑似数据问题' if rule in DATA_RULES else '经营信号 / 符号待核查',
+            'category':('待核对到齐条件' if pending_reason else ('疑似数据问题' if rule in DATA_RULES else '经营信号 / 符号待核查')),
+            'assessment':'maturity_unverified' if pending_reason else 'observation',
+            'pending_reason':pending_reason,
             'hit_count':counts[rule], 'unit':'SKU/店铺/平台/日分组' if definitions[rule]['level']=='aggregate' else '来源记录',
             'unknown_inputs':[v for v in evidence.get('unknown_rule_inputs',[]) if v['rule']==rule]})
     empty = not evidence['row_count']
     unknown = bool(evidence.get('unknown_rule_inputs'))
-    status = 'empty_unverified' if empty else ('partial_assessment' if unknown else ('findings' if findings else 'no_hits'))
-    return {'schema_version':1, 'mode':mode, 'status':status, 'query_succeeded':True,
+    has_observations = any(r['hit_count'] and not r['pending_reason'] for r in rule_summary)
+    status = 'empty_unverified' if empty else ('partial_assessment' if unknown else (
+        'observations' if has_observations else ('maturity_unverified' if mode != 'demo' else 'no_hits')))
+    return {'schema_version':2, 'mode':mode, 'status':status, 'query_succeeded':True,
         'checked_at':datetime.now(timezone.utc).isoformat(),
         'window':{'start':str(day), 'end_exclusive':str(day+timedelta(days=1)), 'timezone':str(ZONE)},
         'scope':{'platforms':'all', 'stores':'all', 'fixed_excluded_main_ir':list(core.FIXED_EXCLUDED_MAIN_IR), 'null_main_ir_excluded':True},
         'source_record_count':evidence['row_count'], 'rules':rule_summary,
         'finding_groups':findings, 'finding_group_count':len(findings),
-        'evidence':evidence, 'limitations':[LIMITATION] if mode=='review' else (['演示合成样本，不代表公司实际数据。'] if mode=='demo' else []),
-        'interpretation':'命中不等于已确认错误；不同规则可能命中同一记录，命中数不能相加当作订单数。源记录与广告分组的计数不可混加。'}
+        'advertising_observation':advertising_observation(result['rows'], findings),
+        'evidence':evidence, 'limitations':([LIMITATION, MATURITY_NOTE] if mode=='review' else ([MATURITY_NOTE] if mode=='verified' else ['演示合成样本，不代表公司实际数据。'])),
+        'interpretation':'这里统计规则条件命中，不是已确认异常。不同规则可能命中同一记录，命中数不能相加当作订单数；来源记录与广告分组不可混加。'}
 
 
 def failed_report(day, mode, exc):
@@ -80,9 +127,11 @@ def failed_report(day, mode, exc):
 
 def meaningful_signature(report):
     # Date rollover and differing raw row counts alone are not an actionable change.
-    groups = [{k:v for k,v in row.items() if k!='day'} for row in report['finding_groups']]
+    deferred = {r['rule'] for r in report['rules'] if r.get('assessment') == 'maturity_unverified'}
+    groups = [{k:v for k,v in row.items() if k!='day'} for row in report['finding_groups'] if row['anomaly_rules'] not in deferred]
+    rules = [{k:v for k,v in row.items() if row['rule'] not in deferred or k not in {'hit_count','unknown_inputs'}} for row in report['rules']]
     payload = {'mode':report['mode'],'status':report['status'],'error':report.get('error'),
-        'rules':report['rules'],'groups':sorted(groups,key=lambda x:json.dumps(x,sort_keys=True)),
+        'rules':rules,'groups':sorted(groups,key=lambda x:json.dumps(x,sort_keys=True)),
         'rule_version':report.get('evidence',{}).get('rule_version'), 'scope':report.get('scope')}
     return sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
@@ -112,13 +161,20 @@ def markdown_report(report):
         return '\n'.join(lines+['',report['error']['message'],''])
     lines += ['',f"检查 {report['source_record_count']} 条来源记录，执行 {len(report['rules'])} 条规则；覆盖全部平台、店铺。",'',
         '固定排除四类费用/折扣 main_ir 及 NULL main_ir。', '', report['interpretation'],'',
-        '| 规则 | 分类 | 命中数 | 计数单位 | 无法判断的输入 |','| --- | --- | ---: | --- | --- |']
+        '| 规则 | 判断状态 | 条件命中数 | 计数单位 | 尚缺依据 |','| --- | --- | ---: | --- | --- |']
     for row in report['rules']:
-        missing='；'.join(f"{v['field']}：{v['unknown_rows']} 条" for v in row['unknown_inputs']) or '无'
+        missing='；'.join(filter(None, [row.get('pending_reason','')] + [f"{v['field']}：{v['unknown_rows']} 条" for v in row['unknown_inputs']])) or '未发现缺失输入；仍需业务核对'
         lines.append('| '+' | '.join(cell(v) for v in [row['label'],row['category'],row['hit_count'],row['unit'],missing])+' |')
+    ads = report['advertising_observation']
+    if ads['group_count']:
+        lines += ['',f"广告与同日账面销售观察：{ads['group_count']} 个 SKU/日分组，涉及 {ads['platform_count']} 个平台、{ads['store_count']} 个平台/店铺组合、{ads['distinct_sku_count']} 个不同 SKU。",
+            f"其中 {ads['no_matching_order_groups']} 个分组在本次范围内无匹配订单，{ads['orders_present_zero_net_sales_groups']} 个有订单记录但净销售额为零。",ads['interpretation'],'',
+            '| 平台 | 店铺 | SKU/日分组数 |','| --- | --- | ---: |']
+        for item in ads['by_platform_store']:
+            lines.append('| '+' | '.join(cell(item[k]) for k in ['platform','store','sku_day_groups'])+' |')
     if report['finding_groups']:
         selected=sorted(report['finding_groups'],key=lambda x:(-x['规则命中样本数'],str(x.get('sku'))))[:30]
-        lines += ['',f"以下展示 {len(selected)}/{report['finding_group_count']} 个异常汇总分组；完整分组见同目录 report.json。",'',
+        lines += ['',f"以下展示 {len(selected)}/{report['finding_group_count']} 个条件命中分组（未判异常）；完整分组见同目录 report.json。",'',
             '| 平台 | 店铺 | SKU | 规则 | 命中数 |','| --- | --- | --- | --- | ---: |']
         for row in selected:
             lines.append('| '+' | '.join(cell(v) for v in [row.get('market_place'),row.get('store'),row.get('sku'),service.RULE_LABELS[row['anomaly_rules']],row['规则命中样本数']])+' |')
