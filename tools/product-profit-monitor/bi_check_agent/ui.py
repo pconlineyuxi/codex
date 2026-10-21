@@ -1,4 +1,3 @@
-from bi_check_agent.service import summarize_findings, without_order_samples, available_business_options
 """Local Product Profit workbench; one shared engine for queries and monitoring."""
 from datetime import date, datetime, timedelta
 import json
@@ -10,7 +9,11 @@ import streamlit as st
 from dotenv import load_dotenv
 
 from bi_check_agent.ai_parser import parse_business_description
+from bi_check_agent.ai_errors import AIServiceError
+from bi_check_agent.ai_feedback import remember_ai_outcome, render_ai_notice
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.contracts import analysis_status
+from bi_check_agent.service import summarize_findings, without_order_samples, available_business_options
 from bi_check_agent.monitor import MonitorStore
 from bi_check_agent.service import RULE_LABELS, query, decompose, evaluate_plan, records
 
@@ -28,6 +31,8 @@ def _csv(label, frame, filename):
 
 
 def _err(exc):
+    if isinstance(exc, AIServiceError):
+        remember_ai_outcome('failed', exc.code)
     if isinstance(exc,(RuntimeError,ValueError)):
         st.error(str(exc))
     else:
@@ -91,8 +96,11 @@ def scan_questions(record,mode,signature,namespace='manual_scan',title='就本�
     from bi_check_agent.source_analysis import public_evidence
     st.markdown('**'+title+'**')
     snapshot=st.session_state.get(namespace+'_snapshot')
-    ready=snapshot and snapshot['id']==record['id'] and snapshot['mode']==mode
-    stale=signature!=st.session_state.get(namespace+'_signature') or st.session_state.get(namespace+'_failed',False)
+    status=analysis_status(snapshot,mode,record_id=record['id'],
+        scope_matches=signature==st.session_state.get(namespace+'_signature'),
+        failed=st.session_state.get(namespace+'_failed',False))
+    ready=status!='missing'
+    stale=status=='stale'
     if not ready:
         st.info('这份旧巡查记录没有保留源数据，请点击“立即巡查”重新运行后再提问。')
     elif stale:
@@ -116,6 +124,7 @@ def scan_questions(record,mode,signature,namespace='manual_scan',title='就本�
             with st.chat_message('assistant'):
                 with st.spinner('分析本次巡查的源数据…'):
                     reply=profit_analysis.answer(snapshot,question,chat)
+                remember_ai_outcome('succeeded')
                 st.markdown(reply['content'])
                 with st.expander('查看巡查问答依据'):st.json(public_evidence(reply['evidence']))
             chat.extend([{'role':'user','content':question},{'role':'assistant',**reply}])
@@ -223,9 +232,14 @@ def queries(mode):
         try:
             parsed=parse_business_description(text)
             st.session_state['parsed_query']=parsed
+            remember_ai_outcome(parsed.get('ai_status'), parsed.get('ai_error_code'))
         except Exception as exc:_err(exc)
     parsed=st.session_state.get('parsed_query',{})
     if parsed:
+        if parsed.get('ai_status') in {'failed','not_configured'}:
+            for warning in parsed.get('warnings',[]):
+                st.warning(warning)
+            st.caption('以下为本地规则解析草稿；parsed=true 仅表示识别到了日期范围，不表示 AI 调用成功或所有条件都已识别。')
         st.caption('解析结果仅作为草稿；以下实际执行范围需要你核对。')
         with st.expander('查看解析结果与未识别条件',expanded=bool(parsed.get('missing_required_fields') or parsed.get('unresolved_terms'))): st.json(parsed)
     def parsed_date(name,fallback):
@@ -393,6 +407,7 @@ def main():
     if mode=='demo':st.warning('演示模式 · 以下均为合成样本，不代表公司实际数据，不会发送飞书。')
     elif mode=='live_test':st.warning('真实数据测试 · 店铺可多选或留空查询全部，最多一年（366 天，含闰年）；刷新完整性、币种和源日期时区待核对。不用于定时巡查、异常恢复或飞书通知。')
     else:st.info('正式巡查数据 · 只读查询；需要数据库配置与可信刷新凭据。')
+    ai_notice=st.empty()
     store=MonitorStore(os.getenv('PROFIT_STATE_DB','.runtime/monitor.sqlite3'))
     monitor_mode='live' if mode=='live_test' else mode
     if mode=='live_test' and page not in {'业务问题定位','利润变化分析'}:
@@ -406,3 +421,4 @@ def main():
         render(mode,business_filters,_csv,_err)
     elif page=='异常历史':history(store,monitor_mode)
     else:plans(store,monitor_mode)
+    render_ai_notice(ai_notice)

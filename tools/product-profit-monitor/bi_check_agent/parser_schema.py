@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 from typing import Any
+from bi_check_agent.rule_catalog import RULE_IDS, RULES
 
 ALLOWED_AGGREGATION_DIMENSIONS = ["main_ir", "ir", "sku", "marketplace", "store", "day", "week", "month"]
-ANOMALY_RULES = [
-    "zero_units_with_sales", "zero_sales_with_units", "negative_units", "negative_sales",
-    "negative_shipping_fee", "negative_promotion", "negative_commission", "negative_ad_spend",
-    "missing_product_cost", "unit_cost_non_positive", "removed_hardware_abnormal",
-    "shipping_cost_ratio_high", "unit_shipping_fee_high", "promotion_ratio_high",
-    "ad_spend_ratio_high", "ad_spend_without_sales", "profit_rate_with_ads_ship_high",
-]
+ANOMALY_RULES = list(RULE_IDS)
 FILTER_FIELDS = [
     "marketplace", "store", "sku", "main_ir", "ir", "order_id", "follower", "brand",
     "category", "category_exclude", "ir_exclude", "attribute_use_for", "attribute_screen_size",
@@ -31,25 +26,7 @@ MARKETPLACE_ALIASES = {
     "newegg": "Newegg", "neweggbusiness": "Neweggbusiness", "ebay": "eBay", "bestbuy": "BestBuy",
     "kohls": "Kohl's", "kohl's": "Kohl's", "temu": "Temu", "target": "Target", "tiktok": "TikTok", "macys": "Macys",
 }
-RULE_ALIASES = {
-    "zero_units_with_sales": ["units = 0", "unit = 0", "销量为0", "销量是0", "units为0但sales不为0", "有销售没数量"],
-    "zero_sales_with_units": ["sales = 0", "销售额为0", "销售为0但units不为0", "有数量没销售", "price_subtotal = 0"],
-    "negative_units": ["units < 0", "negative units", "销量为负", "负销量"],
-    "negative_sales": ["sales < 0", "negative sales", "销售额为负", "负销售"],
-    "negative_shipping_fee": ["shipping fee < 0", "negative shipping", "运费为负", "负运费"],
-    "negative_promotion": ["promotion < 0", "promo < 0", "促销为负", "负促销"],
-    "negative_commission": ["commission < 0", "佣金为负", "负佣金"],
-    "negative_ad_spend": ["ad_spend < 0", "ads < 0", "广告为负", "负广告"],
-    "missing_product_cost": ["missing product cost", "成本缺失", "没有成本", "product cost missing", "product_cost_unit为空"],
-    "unit_cost_non_positive": ["unit cost <= 0", "单件成本小于等于0", "成本小于等于0", "unit cost异常"],
-    "removed_hardware_abnormal": ["removed hardware", "移除硬件异常", "拆除硬件异常"],
-    "shipping_cost_ratio_high": ["shipping ratio", "shipping fee / sales", "运费占比", "运费比例", "shipping超过", "运费超过"],
-    "unit_shipping_fee_high": ["unit shipping", "shipping fee / units", "单件运费", "每件运费"],
-    "promotion_ratio_high": ["promotion ratio", "promo ratio", "促销占比", "促销比例"],
-    "ad_spend_ratio_high": ["ad spend ratio", "ad_spend / sales", "tacos", "广告占比", "广告比例", "广告花费异常"],
-    "ad_spend_without_sales": ["ad spend without sales", "有广告没销售", "销售为0且广告大于0"],
-    "profit_rate_with_ads_ship_high": ["profit rate > 1", "利润率大于1", "profit rate with ads ship", "利润率异常"],
-}
+RULE_ALIASES = {key: list(rule.aliases) for key, rule in RULES.items()}
 
 
 def default_parser_result() -> dict[str, Any]:
@@ -74,6 +51,8 @@ def default_parser_result() -> dict[str, Any]:
         "unresolved_terms": [],
         "notes": [],
         "source": "fallback",
+        "ai_status": "not_used",
+        "ai_error_code": None,
     }
 
 

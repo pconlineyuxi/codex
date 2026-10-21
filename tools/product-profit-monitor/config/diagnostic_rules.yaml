@@ -4,10 +4,10 @@ tolerances:
   rate_abs: 0.001
   units_abs: 0.0
 thresholds:
-  shipping_cost_ratio_high: 0.50
+  shipping_cost_ratio_high: 0.5
   unit_shipping_fee_high: 80.0
-  promotion_ratio_high: 0.50
-  ad_spend_ratio_high: 0.10
+  promotion_ratio_high: 0.5
+  ad_spend_ratio_high: 0.1
   profit_rate_with_ads_ship_high: 1.0
   max_query_days: 366
   max_result_rows: 50000
@@ -16,84 +16,314 @@ queryable_rules:
     severity: P0
     level: line
     description: Units = 0 but Sales is not 0.
+    label: 数量为零但有销售额
+    label_en: Units = 0 but Sales != 0
+    aliases:
+    - units = 0
+    - unit = 0
+    - 销量为0
+    - 销量是0
+    - units为0但sales不为0
+    - 有销售没数量
+    required_fields:
+    - units
+    - sales
+    tags:
+    - patrol_data_issue
+    - awaits_sales
+    - lifecycle_sales
+    - monitor_data_issue
   zero_sales_with_units:
     severity: P0
     level: line
     description: Sales = 0 but Units is not 0.
+    label: 有数量但销售额为零
+    label_en: Sales = 0 but Units != 0
+    aliases:
+    - sales = 0
+    - 销售额为0
+    - 销售为0但units不为0
+    - 有数量没销售
+    - price_subtotal = 0
+    required_fields:
+    - units
+    - sales
+    tags:
+    - patrol_data_issue
+    - awaits_sales
+    - lifecycle_sales
   negative_units:
     severity: P0
     level: line
     description: Units is negative.
+    label: 负数量待核查
+    label_en: Units < 0
+    aliases:
+    - units < 0
+    - negative units
+    - 销量为负
+    - 负销量
+    required_fields:
+    - units
+    tags: []
   negative_sales:
     severity: P0
     level: line
     description: Sales is negative.
+    label: 负销售额待核查
+    label_en: Sales < 0
+    aliases:
+    - sales < 0
+    - negative sales
+    - 销售额为负
+    - 负销售
+    required_fields:
+    - sales
+    tags:
+    - awaits_sales
+    - lifecycle_sales
   negative_shipping_fee:
     severity: P1
     level: line
     description: Shipping fee is negative.
+    label: 负运费待核查
+    label_en: Shipping Fee < 0
+    aliases:
+    - shipping fee < 0
+    - negative shipping
+    - 运费为负
+    - 负运费
+    required_fields:
+    - shipping_fee
+    tags: []
   negative_promotion:
     severity: P1
     level: line
     description: Raw promotion is negative; review the source sign convention, not an automatic error.
+    label: 原始促销金额为负（符号待核查）
+    label_en: Raw promotion < 0 (review sign convention)
+    aliases:
+    - promotion < 0
+    - promo < 0
+    - 促销为负
+    - 负促销
+    required_fields:
+    - raw_promotion
+    tags: []
   negative_commission:
     severity: P1
     level: line
     description: Commission is negative.
+    label: 负佣金待核查
+    label_en: Commission < 0
+    aliases:
+    - commission < 0
+    - 佣金为负
+    - 负佣金
+    required_fields:
+    - commission
+    tags: []
   negative_ad_spend:
     severity: P1
     level: aggregate
     description: Ad spend is negative.
+    label: 负广告费待核查
+    label_en: Ad Spend < 0
+    aliases:
+    - ad_spend < 0
+    - ads < 0
+    - 广告为负
+    - 负广告
+    required_fields:
+    - ad_spend
+    tags: []
   missing_product_cost:
     severity: P0
     level: line
     description: Product cost per unit is null or non-positive while cost should exist.
+    label: 产品成本缺失或非正数
+    label_en: Missing / non-positive product cost
+    aliases:
+    - missing product cost
+    - 成本缺失
+    - 没有成本
+    - product cost missing
+    - product_cost_unit为空
+    required_fields: []
+    tags:
+    - patrol_data_issue
+    - default_patrol
+    - awaits_cost
+    - lifecycle_cost
+    - monitor_data_issue
   unit_cost_non_positive:
     severity: P0
     level: line
     description: product_cost_unit + hardware_cost - removed_hardware <= 0.
+    label: 单件总成本非正数
+    label_en: Unit cost <= 0
+    aliases:
+    - unit cost <= 0
+    - 单件成本小于等于0
+    - 成本小于等于0
+    - unit cost异常
+    required_fields:
+    - product_cost_unit
+    - hardware_cost
+    - removed_hardware
+    tags:
+    - patrol_data_issue
+    - awaits_cost
+    - lifecycle_cost
+    - monitor_data_issue
   removed_hardware_abnormal:
     severity: P1
     level: line
     description: removed_hardware is greater than product_cost_unit + hardware_cost.
+    label: 拆件成本超过整机与改装成本
+    label_en: Removed hardware > product cost + hardware cost
+    aliases:
+    - removed hardware
+    - 移除硬件异常
+    - 拆除硬件异常
+    required_fields:
+    - product_cost_unit
+    - hardware_cost
+    - removed_hardware
+    tags:
+    - patrol_data_issue
+    - awaits_cost
+    - lifecycle_cost
   shipping_cost_ratio_high:
     severity: P1
     level: line
     description: shipping_fee / sales exceeds configured threshold.
+    label: 运费占比偏高
+    label_en: Shipping Fee / Sales high
+    aliases:
+    - shipping ratio
+    - shipping fee / sales
+    - 运费占比
+    - 运费比例
+    - shipping超过
+    - 运费超过
+    required_fields:
+    - sales
+    - shipping_fee
+    tags:
+    - default_patrol
+    - awaits_sales
   unit_shipping_fee_high:
     severity: P1
     level: line
     description: shipping_fee / units exceeds configured threshold.
+    label: 单件运费偏高
+    label_en: Shipping Fee / Units high
+    aliases:
+    - unit shipping
+    - shipping fee / units
+    - 单件运费
+    - 每件运费
+    required_fields:
+    - units
+    - shipping_fee
+    tags: []
   promotion_ratio_high:
     severity: P1
     level: line
     description: promo_cost / sales exceeds configured threshold.
+    label: 促销占比偏高
+    label_en: Promotion / Sales high
+    aliases:
+    - promotion ratio
+    - promo ratio
+    - 促销占比
+    - 促销比例
+    required_fields:
+    - sales
+    - promo_cost
+    tags:
+    - awaits_sales
   ad_spend_ratio_high:
     severity: P1
     level: aggregate
     description: ad_spend / sales exceeds configured threshold.
+    label: 广告占比偏高
+    label_en: Ad Spend / Sales high
+    aliases:
+    - ad spend ratio
+    - ad_spend / sales
+    - tacos
+    - 广告占比
+    - 广告比例
+    - 广告花费异常
+    required_fields:
+    - sales
+    - ad_spend
+    tags:
+    - awaits_sales
+    - awaits_ads
   ad_spend_without_sales:
     severity: P1
     level: aggregate
     description: ad_spend > 0 while sales = 0.
+    label: 有广告支出但无销售
+    label_en: Ad Spend > 0 with Sales = 0
+    aliases:
+    - ad spend without sales
+    - 有广告没销售
+    - 销售为0且广告大于0
+    - 只有广告花费但没有销售
+    - 只有广告支出但没有销售
+    - 只有广告花费但无销售
+    - 广告花费大于0但没有销售
+    required_fields:
+    - sales
+    - ad_spend
+    tags:
+    - default_patrol
+    - awaits_sales
+    - awaits_ads
   profit_rate_with_ads_ship_high:
     severity: P1
     level: aggregate
     description: profit rate with Ads & Ship > 1.
+    label: 利润率大于 100%
+    label_en: Profit rate with Ads & Ship > 1
+    aliases:
+    - profit rate > 1
+    - 利润率大于1
+    - profit rate with ads ship
+    - 利润率异常
+    required_fields:
+    - sales
+    - order_cost_total
+    - commission
+    - ad_spend
+    - shipping_fee
+    tags:
+    - patrol_data_issue
+    - awaits_sales
+    - awaits_cost
+    - awaits_ads
 normal_business_cases:
   bundle_accessory_cost_allocation:
-    description: Bundle accessory sales/commission/shipping/promotion can be adjusted to make accessory profit close to zero; do not treat near-zero accessory profit or zero accessory shipping/promotion as anomaly by itself.
+    description: Bundle accessory sales/commission/shipping/promotion can be adjusted to make accessory profit close
+      to zero; do not treat near-zero accessory profit or zero accessory shipping/promotion as anomaly by itself.
   amazon_only_promotion_coverage:
-    description: Promotion is currently mainly available from Amazon; non-Amazon zero promotion is not a missing-data anomaly by itself.
+    description: Promotion is currently mainly available from Amazon; non-Amazon zero promotion is not a missing-data
+      anomaly by itself.
   bundle_promotion_allocation:
     description: Bundle promotion is allocated to main product; accessory promotion can be 0 normally.
   bundle_shipping_allocation:
     description: Bundle shipping fee is allocated to main product; accessory shipping can be 0 normally.
   v3_3_ad_ir_placeholder:
-    description: V3.3 ad spend may use product_v3_3 as placeholder IR because SKU-level ad data cannot map to configuration IR.
+    description: V3.3 ad spend may use product_v3_3 as placeholder IR because SKU-level ad data cannot map to configuration
+      IR.
   newegg_ad_start_date:
     effective_start_date: '2025-03-19'
-    description: Newegg ad data starts from 2025-03-19; earlier zero ad spend should not be treated as missing ad data.
+    description: Newegg ad data starts from 2025-03-19; earlier zero ad spend should not be treated as missing ad
+      data.
   ef_estimated_shipping_start_date:
     effective_start_date: '2025-03-13'
     description: EF estimated shipping cost starts from 2025-03-13.
@@ -102,8 +332,14 @@ normal_business_cases:
     description: Amazon estimated shipping cost starts from 2025-08-06.
 rule_guards:
   promotion_ratio_high:
-    skip_when_marketplace_not_in: [Amazon, Amazon US, Amazon CA, Amazon USA, Amazon USA(Renew)]
-    guard_note: Promotion coverage is mainly Amazon; non-Amazon promotion anomalies are downgraded unless explicitly requested.
+    skip_when_marketplace_not_in:
+    - Amazon
+    - Amazon US
+    - Amazon CA
+    - Amazon USA
+    - Amazon USA(Renew)
+    guard_note: Promotion coverage is mainly Amazon; non-Amazon promotion anomalies are downgraded unless explicitly
+      requested.
   ad_spend_ratio_high:
     aggregate_only: true
     guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.

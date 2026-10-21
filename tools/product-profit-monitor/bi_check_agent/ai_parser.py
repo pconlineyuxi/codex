@@ -5,6 +5,7 @@ import os
 import re
 from typing import Any
 
+from bi_check_agent.ai_errors import failure_detail as _ai_failure_detail
 from bi_check_agent.parser_rules import fallback_parse, parse_time_range, today_est
 from bi_check_agent.parser_schema import (
     ALLOWED_AGGREGATION_DIMENSIONS,
@@ -46,9 +47,12 @@ def _merge_rule_overrides(description: str, parsed: dict[str, Any]) -> dict[str,
         parsed["end_date"] = end.isoformat()
         parsed.setdefault("time_range", {}).update({"start_date": start.isoformat(), "end_date": end.isoformat(), "timezone": "America/New_York", "boundary": "left_closed_right_open", "source_text": source_text, "display_label": display_label})
         parsed.setdefault("notes", []).append(note)
-    if rule_result.get("aggregation_dimensions"):
+    if rule_result.get("aggregation_dimensions") and (
+        rule_result.get("aggregation_dimensions_source") == "user_specified"
+        or not parsed.get("aggregation_dimensions")
+    ):
         parsed["aggregation_dimensions"] = rule_result["aggregation_dimensions"]
-        parsed["aggregation_dimensions_source"] = "user_specified"
+        parsed["aggregation_dimensions_source"] = rule_result["aggregation_dimensions_source"]
     if rule_result.get("anomaly_rules"):
         existing = list(parsed.get("anomaly_rules") or [])
         parsed["anomaly_rules"] = existing + [r for r in rule_result["anomaly_rules"] if r not in existing]
@@ -85,7 +89,10 @@ def ai_parse(description: str) -> dict[str, Any]:
     api_key = os.getenv("OPENAI_API_KEY")
     model = os.getenv("OPENAI_MODEL", "gpt-5.4")
     if not api_key:
-        return fallback_parse(description)
+        fallback = fallback_parse(description)
+        fallback['ai_status'] = 'not_configured'
+        fallback['warnings'].append('尚未配置模型 API Key，当前使用本地规则解析；请核对草稿。')
+        return fallback
 
     system_prompt = f"""
 You are a strict parser for a controlled product-profit data anomaly query tool.
@@ -106,6 +113,7 @@ Hard rules:
 - Supported business aliases: {RULE_ALIASES}
 - 售价为0/售价是0/售价等于零 maps to existing zero_sales_with_units (sales = 0 AND units != 0); this is supported. Explain that this rule checks sales amount with nonzero quantity, not price_unit alone.
 - Only choose aggregation_dimensions from: {ALLOWED_AGGREGATION_DIMENSIONS}
+- aggregation_dimensions must not be empty. If none are specified or derived from the filters, use ["main_ir"] and aggregation_dimensions_source="default_main_ir_when_empty".
 - Only choose filter fields from: {FILTER_FIELDS}
 - If the user asks for normal data without anomaly language, keep anomaly_rules empty and do not add missing_required_fields for anomaly_rules.
 - If the user says only "异常" without a specific anomaly type, keep anomaly_rules empty and add missing_required_fields=["anomaly_rules"].
@@ -140,15 +148,25 @@ Return this JSON shape:
             response_format={"type": "json_object"},
             messages=[{"role": "system", "content": system_prompt}, {"role": "user", "content": description}],
         )
-        raw = _clean_json_dict(response.choices[0].message.content or "{}")
+        choice = response.choices[0]
+        if getattr(choice, 'finish_reason', None) not in (None, 'stop'):
+            raise ValueError('Incomplete parser response')
+        raw = _clean_json_dict(choice.message.content or "{}")
+        if not isinstance(raw, dict) or not raw:
+            raise ValueError('Empty or invalid parser response')
         merged = default_parser_result()
         merged.update(raw)
         merged["source"] = "openai_with_rule_validation_v20"
+        merged['ai_status'] = 'succeeded'
+        merged['ai_error_code'] = None
         return sanitize_parser_result(_merge_rule_overrides(description, merged))
     except Exception as exc:
         fallback = fallback_parse(description)
         fallback["source"] = "fallback_after_ai_error_v20"
-        fallback.setdefault("warnings", []).append("AI 解析未完成，已使用本地规则解析；请核对草稿。")
+        code, message = _ai_failure_detail(exc)
+        fallback['ai_status'] = 'failed'
+        fallback['ai_error_code'] = code
+        fallback.setdefault("warnings", []).append(message + ' 已使用本地规则生成草稿，可能遗漏条件；请核对日期、筛选、汇总维度和检查规则。')
         return sanitize_parser_result(fallback)
 
 

@@ -4,28 +4,11 @@ from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
+from bi_check_agent.rule_catalog import RULE_IDS
 
 
 ALLOWED_AGGREGATION_DIMENSIONS = {"main_ir", "ir", "sku", "marketplace", "store", "day", "week", "month"}
-ALLOWED_ANOMALY_RULES = {
-    "zero_units_with_sales",
-    "zero_sales_with_units",
-    "negative_units",
-    "negative_sales",
-    "negative_shipping_fee",
-    "negative_promotion",
-    "negative_commission",
-    "negative_ad_spend",
-    "missing_product_cost",
-    "unit_cost_non_positive",
-    "removed_hardware_abnormal",
-    "shipping_cost_ratio_high",
-    "unit_shipping_fee_high",
-    "promotion_ratio_high",
-    "ad_spend_ratio_high",
-    "ad_spend_without_sales",
-    "profit_rate_with_ads_ship_high",
-}
+ALLOWED_ANOMALY_RULES = frozenset(RULE_IDS)
 
 
 class AnomalyQueryRequest(BaseModel):

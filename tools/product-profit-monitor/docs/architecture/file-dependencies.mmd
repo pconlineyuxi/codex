@@ -1,0 +1,58 @@
+flowchart TB
+    entry["根 app.py"]
+    profit_ui["profit_ui.py"]
+    db["db.py"]
+    parser_rules["parser_rules.py"]
+    versioning["versioning.py"]
+    core["core.py"]
+    service["service.py"]
+    __init__["__init__.py<br/>包版本声明"]
+    worker["worker.py"]
+    profit_analysis["profit_analysis.py"]
+    source_analysis["source_analysis.py"]
+    ui["ui.py"]
+    app["包内 app.py<br/>兼容入口"]
+    parser_schema["parser_schema.py"]
+    ai_parser["ai_parser.py"]
+    notifications["notifications.py"]
+    models["models.py"]
+    monitor["monitor.py"]
+    entry --> ui
+    ai_parser --> parser_rules
+    ai_parser --> parser_schema
+    app --> ui
+    core --> models
+    monitor --> notifications
+    monitor --> versioning
+    parser_rules --> parser_schema
+    profit_analysis --> models
+    profit_analysis --> service
+    profit_analysis --> source_analysis
+    profit_ui --> models
+    profit_ui --> profit_analysis
+    profit_ui --> service
+    profit_ui --> source_analysis
+    service --> core
+    service --> db
+    service --> models
+    service --> versioning
+    ui --> ai_parser
+    ui --> models
+    ui --> monitor
+    ui --> profit_analysis
+    ui --> profit_ui
+    ui --> service
+    ui --> source_analysis
+    ui --> versioning
+    worker --> monitor
+    worker --> service
+    monitor -.->|evaluate 回调| service
+    profit_ui -.->|筛选、导出与错误处理回调| ui
+    classDef entryStyle fill:#eaf2ff,stroke:#4776b4,color:#193450
+    classDef engineStyle fill:#e9f6ef,stroke:#448666,color:#224733
+    classDef aiStyle fill:#f2edfc,stroke:#8868b0,color:#49345f
+    classDef commonStyle fill:#fff4df,stroke:#b88b39,color:#614b23
+    class entry,app,ui,profit_ui,worker entryStyle
+    class service,core,db,monitor,notifications engineStyle
+    class ai_parser,parser_rules,parser_schema,profit_analysis,source_analysis aiStyle
+    class models,versioning,__init__ commonStyle

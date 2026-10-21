@@ -141,14 +141,14 @@ def test_feishu_timeout_is_uncertain(monkeypatch):
         FeishuSender().send({'mode': 'live', 'shadow': False, 'events': [], 'uuid': 'stable-test'})
 
 
-def test_rule_source_edits_do_not_recover_previous_scope(tmp_path, monkeypatch):
+def test_policy_edits_do_not_recover_previous_scope(tmp_path, monkeypatch):
     import bi_check_agent.monitor as monitor
     s = MonitorStore(tmp_path / 'db')
     p = plan(s)
-    monkeypatch.setattr(monitor, 'rule_source_version', lambda: 'version-one')
+    monkeypatch.setattr(monitor, 'diagnostic_policy_version', lambda: 'version-one')
     s.run(p, '2026-09-01', '2026-09-02', evaluation())
     original_id = s.incidents()[0]['id']
-    monkeypatch.setattr(monitor, 'rule_source_version', lambda: 'version-two')
+    monkeypatch.setattr(monitor, 'diagnostic_policy_version', lambda: 'version-two')
     assert s.run(p, '2026-09-01', '2026-09-02', clean)['events'] == []
     assert s.incident(original_id)['status'] == 'open'
     assert s.open_windows(p) == []

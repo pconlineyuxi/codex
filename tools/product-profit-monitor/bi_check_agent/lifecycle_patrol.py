@@ -6,10 +6,11 @@ import os
 import pandas as pd
 
 from bi_check_agent import core, db, service
+from bi_check_agent.rule_catalog import rules_with_tag
 
 ZONE = ZoneInfo('America/New_York')
-SALES_RULES = ['zero_units_with_sales', 'zero_sales_with_units', 'negative_sales']
-COST_RULES = ['missing_product_cost', 'unit_cost_non_positive', 'removed_hardware_abnormal']
+SALES_RULES = list(rules_with_tag('lifecycle_sales'))
+COST_RULES = list(rules_with_tag('lifecycle_cost'))
 NOTE = ('按预期补齐时限复核，不代表补跑任务已成功。销售额按创建当日应补齐；成本按出库后次日纽约时间 09:00 复核。'
         'scan_time 的 UTC 口径已由用户确认；sale_order.create_date 按 UTC 解释，与本次时间核查一致，仍属待业务确认的假设。'
         '金额来自物化结果视图的直接订单来源 bi.ba_profit_order_line_info，以订单行 ID 关联；与辅助观察不是同一快照。'

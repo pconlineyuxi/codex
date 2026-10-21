@@ -11,19 +11,10 @@ import pandas as pd
 
 from bi_check_agent import core, db
 from bi_check_agent.models import AnomalyQueryRequest
-from bi_check_agent.versioning import rule_source_version
+from bi_check_agent.versioning import rule_source_version, diagnostic_policy_version
 
-RULE_LABELS = {
-    'zero_units_with_sales': '数量为零但有销售额', 'zero_sales_with_units': '有数量但销售额为零',
-    'negative_units': '负数量待核查', 'negative_sales': '负销售额待核查',
-    'negative_shipping_fee': '负运费待核查', 'negative_promotion': '原始促销金额为负（符号待核查）',
-    'negative_commission': '负佣金待核查', 'negative_ad_spend': '负广告费待核查',
-    'missing_product_cost': '产品成本缺失或非正数', 'unit_cost_non_positive': '单件总成本非正数',
-    'removed_hardware_abnormal': '拆件成本超过整机与改装成本',
-    'shipping_cost_ratio_high': '运费占比偏高', 'unit_shipping_fee_high': '单件运费偏高',
-    'promotion_ratio_high': '促销占比偏高', 'ad_spend_ratio_high': '广告占比偏高',
-    'ad_spend_without_sales': '有广告支出但无销售', 'profit_rate_with_ads_ship_high': '利润率大于 100%',
-}
+from bi_check_agent.rule_catalog import RULES, RULE_LABELS, rules_with_tag, ensure_catalog_current
+from bi_check_agent.contracts import QueryEvidence, QueryResult
 
 
 def _json(value):
@@ -97,31 +88,20 @@ def demo_rows(req):
 
 
 def rule_unknowns(rows, rules):
-    required={
-        'zero_units_with_sales':['units','sales'], 'zero_sales_with_units':['units','sales'],
-        'negative_units':['units'], 'negative_sales':['sales'], 'negative_shipping_fee':['shipping_fee'],
-        'negative_promotion':['raw_promotion'], 'negative_commission':['commission'],
-        'unit_cost_non_positive':['product_cost_unit','hardware_cost','removed_hardware'],
-        'removed_hardware_abnormal':['product_cost_unit','hardware_cost','removed_hardware'],
-        'shipping_cost_ratio_high':['sales','shipping_fee'], 'unit_shipping_fee_high':['units','shipping_fee'],
-        'promotion_ratio_high':['sales','promo_cost'], 'negative_ad_spend':['ad_spend'],
-        'ad_spend_ratio_high':['sales','ad_spend'], 'ad_spend_without_sales':['sales','ad_spend'],
-        'profit_rate_with_ads_ship_high':['sales','order_cost_total','commission','ad_spend','shipping_fee'],
-    }
-    aggregate_rules={'negative_ad_spend','ad_spend_ratio_high','ad_spend_without_sales','profit_rate_with_ads_ship_high'}
     result=[]
     for rule in rules:
-        subset=rows if rule in aggregate_rules or 'type' not in rows else rows[rows['type']=='order']
+        subset=rows if RULES[rule].level == 'aggregate' or 'type' not in rows else rows[rows['type']=='order']
         if rule=='promotion_ratio_high' and 'market_place' in subset:
             allowed=core.load_yaml('diagnostic_rules.yaml')['rule_guards'][rule]['skip_when_marketplace_not_in']
             subset=subset[subset.market_place.str.lower().isin([x.lower() for x in allowed])]
-        for field in required.get(rule,[]):
+        for field in RULES[rule].required_fields:
             missing=len(subset) if field not in subset else int((~pd.to_numeric(subset[field],errors='coerce').map(__import__('numpy').isfinite)).sum())
             if missing: result.append({'rule':rule,'field':field,'unknown_rows':missing})
     return result
 
 
 def query(req: AnomalyQueryRequest, mode='demo', progress=None):
+    ensure_catalog_current()
     if not req.aggregation_dimensions: raise ValueError('汇总维度不能为空，请至少选择一个汇总维度')
     if mode not in {'demo','live','live_test'}: raise ValueError('未知数据模式')
     _,_,applied,skipped=core.build_order_line_sql(req)
@@ -167,11 +147,11 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
               'currency':'DEMO USD' if mode=='demo' else ('源金额（币种待核对）' if mode=='live_test' else before['currency']),
               'freshness_verified':mode=='live',
               'testing_note':'真实测试未核实刷新完整性、币种及源日期时区，不能作为正式巡查或恢复证据。' if mode=='live_test' else None,
-              'rule_version':rule_source_version(),
+              'rule_version':rule_source_version(),'policy_version':diagnostic_policy_version(),
               'applied_filters':applied,'unrestricted_filters':skipped,
               'query':req.model_dump(mode='json'),'unknown_rule_inputs':rule_unknowns(rows,req.anomaly_rules),'localization_limit':'已定位到 Product Profit 结果视图，尚未接入上游源表验证。'}
-    return {'rows':rows,'aggregate':core.aggregate_product(rows,req.aggregation_dimensions),
-            'anomalies':anomalies,'evidence':evidence}
+    return QueryResult(rows=rows, aggregate=core.aggregate_product(rows,req.aggregation_dimensions),
+                       anomalies=anomalies, evidence=QueryEvidence(**evidence)).as_dict()
 
 
 def evaluate_plan(plan,start,end):
@@ -211,7 +191,7 @@ def evaluate_plan(plan,start,end):
             if rule in thresholds:threshold=thresholds[rule]
             item=findings.setdefault(key,{'key':key,'rule':rule,
                'object':' / '.join(str(fields[k]) for k in ['market_place','store','sku','order_id'] if fields.get(k)),
-               'value':0,'evidence':{'classification':'疑似数据错误' if rule in {'missing_product_cost','unit_cost_non_positive','zero_units_with_sales'} else '待核查 / 经营信号',
+               'value':0,'evidence':{'classification':'疑似数据错误' if rule in rules_with_tag('monitor_data_issue') else '待核查 / 经营信号',
                  'samples':[], 'localization_limit':result['evidence']['localization_limit'],
                  'metric':metric,'threshold':threshold,'affected_sales':0.,'affected_sales_missing':False,
                  'affected_sales_note':'受影响销售额不是损失；跨规则不可直接求和。',

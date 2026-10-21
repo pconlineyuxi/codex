@@ -1,0 +1,20 @@
+flowchart LR
+    ROOT["tools/product-profit-monitor<br/>工具根目录"]
+    ROOT --> ENTRY["入口与依赖<br/>app.py · start.command<br/>scripts/start.sh · requirements.txt"]
+    ROOT --> PKG["bi_check_agent/<br/>核心 Python 包<br/>17 个 .py 文件"]
+    PKG --> UI["界面文件<br/>ui.py · profit_ui.py"]
+    PKG --> PARSE["查询解析文件<br/>ai_parser.py<br/>parser_rules.py · parser_schema.py"]
+    PKG --> DOMAIN["查询与计算文件<br/>service.py · core.py · models.py"]
+    PKG --> AI["比较与问答文件<br/>profit_analysis.py · source_analysis.py"]
+    PKG --> MON["巡查与通知文件<br/>worker.py · monitor.py · notifications.py"]
+    PKG --> BASE["基础与兼容文件<br/>db.py · versioning.py<br/>app.py · __init__.py"]
+    ROOT --> CFG["config/<br/>规则阈值与筛选映射 YAML"]
+    ROOT --> SQL["sql/<br/>参考 SQL 文件"]
+    ROOT --> TEST["tests/<br/>10 个测试文件"]
+    ROOT --> DOC["docs/<br/>设计、测试与架构说明"]
+    classDef root fill:#eaf2ff,stroke:#4776b4,color:#193450
+    classDef code fill:#e9f6ef,stroke:#448666,color:#224733
+    classDef support fill:#f2f4f7,stroke:#8391a1,color:#334155
+    class ROOT,PKG root
+    class UI,PARSE,DOMAIN,AI,MON,BASE code
+    class ENTRY,CFG,SQL,TEST,DOC support

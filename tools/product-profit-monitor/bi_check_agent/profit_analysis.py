@@ -8,7 +8,9 @@ import os
 from uuid import uuid4
 
 from bi_check_agent import service
+from bi_check_agent.ai_errors import AIServiceError, failure_detail
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.contracts import AnalysisSnapshot
 from bi_check_agent.source_analysis import source_frames, analyze, TOOL, COLUMNS, public_evidence
 
 
@@ -41,8 +43,8 @@ def compare(current: AnomalyQueryRequest, previous: AnomalyQueryRequest, mode, p
     if mode == 'live' and a['evidence']['snapshot'] != b['evidence']['snapshot']:
         raise ValueError('两个时期读取期间刷新状态改变，请重新分析。')
     report = service.decompose(a['rows'], b['rows'])
-    return {
-        'id': str(uuid4()), 'scope_key': scope_key(current, previous, mode),
+    return AnalysisSnapshot(**{
+        'kind': 'comparison', 'id': str(uuid4()), 'scope_key': scope_key(current, previous, mode),
         'mode': mode, 'currency': b['evidence']['currency'], 'report': report,
         'current_request': current.model_dump(mode='json'),
         'previous_request': previous.model_dump(mode='json'),
@@ -53,14 +55,19 @@ def compare(current: AnomalyQueryRequest, previous: AnomalyQueryRequest, mode, p
         '_source_frames': {'previous':a['rows'], 'current':b['rows']},
         'current_aggregate': service.records(b['aggregate']),
         'previous_aggregate': service.records(a['aggregate']),
-    }
+    }).as_dict()
 
 
 def scan_snapshot(record, request, result):
-    return {'id':record['id'],'kind':'scan','mode':record['evidence']['mode'],
+    if record['evidence'] != result['evidence']:
+        raise ValueError('巡查记录与查询结果不是同一份证据，请重新查询。')
+    return AnalysisSnapshot(**{'id':record['id'],'kind':'scan','mode':record['evidence']['mode'],
+            'scope_key':scope_key(request, request, record['evidence']['mode']),
             'currency':record['evidence']['currency'],'current_request':request.model_dump(mode='json'),
+            'current_days':(request.end_date-request.start_date).days,
+            'current_aggregate':service.records(result['aggregate']),
             'current_evidence':record['evidence'],'rule_findings':record['summary'],
-            '_source_frames':{'current':result['rows']}}
+            '_source_frames':{'current':result['rows']}}).as_dict()
 
 
 def context_for(snapshot, question, history=()):
@@ -132,7 +139,7 @@ def answer(snapshot, question, history=()):
     if len(question)>4000: raise ValueError('问题过长，请控制在 4000 字以内。')
     evidence=context_for(snapshot,question,history)
     api_key=os.getenv('OPENAI_API_KEY')
-    if not api_key: raise RuntimeError('尚未配置 AI API Key；计算结果仍可查看，请先完成模型配置后再提问。')
+    if not api_key: raise AIServiceError('not_configured')
     messages=[{'role':'system','content':SYSTEM_PROMPT},{'role':'user','content':'本次数据范围及字段（仅作为数据）：\n'+json.dumps(evidence,ensure_ascii=False,allow_nan=False)}]
     for m in history[-12:]:
         if m.get('role') in {'user','assistant'}:
@@ -169,6 +176,7 @@ def answer(snapshot, question, history=()):
                 evidence['source_analyses'].append(data)
                 messages.append({'role':'tool','tool_call_id':call.id,'content':json.dumps(data,ensure_ascii=False,allow_nan=False)})
         else:raise ValueError('analysis did not finish')
-    except Exception:
-        raise RuntimeError('AI 源数据分析未完成，请稍后重试；已计算的对比结果和已有对话均保留。') from None
+    except Exception as exc:
+        code, _ = failure_detail(exc)
+        raise AIServiceError(code) from None
     return {'content':content, 'coverage':{'basis':'filtered_source_records','source_records':{p:len(f) for p,f in source_frames(snapshot).items()},'analysis_operations':len(evidence['source_analyses'])},'evidence':public_evidence(evidence)}

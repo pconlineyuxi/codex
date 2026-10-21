@@ -8,7 +8,9 @@ import pandas as pd
 import streamlit as st
 
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.contracts import analysis_status
 from bi_check_agent import profit_analysis as analysis
+from bi_check_agent.ai_feedback import remember_ai_outcome
 from bi_check_agent.service import amount_change_percent
 from bi_check_agent.source_analysis import public_evidence
 
@@ -77,7 +79,9 @@ def render(mode, business_filters, csv, error):
         if not snapshot or snapshot['mode']!=mode:
             st.info('完成分析后，这里会显示利润差额、费用贡献和数据问答。')
             return
-        stale=fingerprint!=snapshot['scope_key'] or st.session_state.get('profit_last_error',False)
+        status=analysis_status(snapshot,mode,scope_matches=fingerprint==snapshot['scope_key'],
+            failed=st.session_state.get('profit_last_error',False))
+        stale=status=='stale'
         if stale: st.warning('条件已变化或重新分析未完成。下方保留上次成功结果；请重新分析后继续提问。')
         st.divider()
         st.markdown('**分析结果**')
@@ -110,7 +114,7 @@ def render(mode, business_filters, csv, error):
         st.markdown('**就这份数据继续提问**')
         st.caption(f"模型：{os.getenv('OPENAI_MODEL','gpt-5.4')}。AI 按需分析本次筛选后、汇总前的源数据，可重新筛选、分组计算和检查相关源记录样本。页面仍只展示汇总结果。")
         st.caption('例如：利润下降主要来自哪项费用？广告费用的变化能否解释利润下降？这份数据还不足以证明什么？')
-        source_ready='_source_frames' in snapshot
+        source_ready=status!='missing'
         if not source_ready: st.info('这份旧结果没有保留源数据；请重新点击“开始利润分析”，之后即可基于源数据提问。')
         else: st.caption('可分析源记录：对比期 '+str(len(snapshot['_source_frames']['previous']))+' 条，本期 '+str(len(snapshot['_source_frames']['current']))+' 条。统计覆盖匹配的完整源记录；样本检查会单独标注覆盖数量。')
         history=st.session_state.setdefault('profit_chat',[])
@@ -131,6 +135,7 @@ def render(mode, business_filters, csv, error):
                 with st.chat_message('assistant'):
                     with st.spinner('分析筛选后的源数据并回答…'):
                         reply=analysis.answer(snapshot,question,history)
+                    remember_ai_outcome('succeeded')
                     st.markdown(reply['content'])
                     if reply.get('coverage',{}).get('basis')=='filtered_source_records':
                         st.caption(f"已执行 {reply['coverage']['analysis_operations']} 项源数据分析，可展开核对分析范围和证据。")

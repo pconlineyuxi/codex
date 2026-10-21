@@ -1,0 +1,38 @@
+sequenceDiagram
+  actor BA as BA
+  participant UI as ui.py
+  participant Parser as ai_parser.py
+  participant Svc as service.py
+  participant Core as core.py
+  participant DB as db.py / PostgreSQL
+  participant Chat as profit_analysis.py
+  participant LLM as OpenAI API
+  participant Local as source_analysis.py
+  BA->>UI: 描述需要核查的问题
+  UI->>Parser: 解析为草稿
+  Note over Parser: 可调用模型；本地日期规则、白名单与兜底
+  Parser-->>UI: 日期、筛选、维度、规则
+  BA->>UI: 核对条件并执行
+  UI->>Svc: AnomalyQueryRequest
+  Svc->>Core: 构建固定过滤与参数化 SQL
+  Core-->>Svc: SQL 与绑定参数
+  loop 按日期读取真实数据
+    Svc->>DB: 只读查询
+    DB-->>Svc: 筛选后、汇总前的记录
+  end
+  Svc->>Core: 聚合与异常检测
+  Core-->>Svc: 聚合表与规则命中
+  Svc-->>UI: rows / aggregate / anomalies / evidence
+  Note over UI: 源记录保留在服务端 session_state；页面展示汇总
+  BA->>UI: 针对本次结果追问
+  UI->>Chat: 数据快照、问题、已有对话
+  Chat->>LLM: 字段、范围、上下文
+  loop 模型工具分析
+    LLM-->>Chat: 结构化分析参数
+    Chat->>Local: 校验白名单并分析完整匹配记录
+    Local-->>Chat: 统计结果或受限样本
+    Chat->>LLM: 分析证据与独立编号
+  end
+  LLM-->>Chat: 带证据引用的回答
+  Chat-->>UI: 通过引用与截断检查的回答
+  UI-->>BA: 回答与可查看的分析依据

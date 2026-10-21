@@ -22,12 +22,15 @@ def _key(value):
     return hashlib.sha256(_json(value).encode()).hexdigest()
 
 
-from bi_check_agent.versioning import rule_source_version
+from bi_check_agent.versioning import rule_source_version, diagnostic_policy_version, compatible_legacy_versions
 
 
-def scope_key(plan):
-    config = {k: v for k, v in plan.items() if k not in {'name', 'enabled', 'shadow', 'hour', 'minute', 'lookback_days'}}
-    return _key({'plan': config, 'rule_source_version': rule_source_version()})
+def _scope_config(plan):
+    return {k: v for k, v in plan.items() if k not in {'name', 'enabled', 'shadow', 'hour', 'minute', 'lookback_days'}}
+
+
+def scope_key(plan, policy_version=None):
+    return _key({'plan': _scope_config(plan), 'policy_version': policy_version or diagnostic_policy_version()})
 
 
 class MonitorStore:
@@ -43,6 +46,7 @@ class MonitorStore:
             CREATE TABLE IF NOT EXISTS history(id INTEGER PRIMARY KEY AUTOINCREMENT, incident_id TEXT, body TEXT);
             CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, status TEXT, body TEXT, updated REAL);
             CREATE TABLE IF NOT EXISTS failures(scope TEXT PRIMARY KEY, active INTEGER, sequence INTEGER);
+            CREATE TABLE IF NOT EXISTS scope_aliases(policy_scope TEXT PRIMARY KEY, stored_scope TEXT NOT NULL UNIQUE);
             ''')
 
     @contextmanager
@@ -101,6 +105,28 @@ class MonitorStore:
         with self._db() as db:
             return [{**json.loads(r['body']), 'id': r['id'], 'status': r['status']} for r in db.execute('SELECT * FROM outbox ORDER BY rowid ASC')]
 
+    def _resolve_scope(self, db, plan, policy_version):
+        """Adopt a verified equivalent legacy scope without rewriting IDs/history.
+
+        Runs, leases, failures, incident links and queued delivery UUIDs retain
+        their keys. The alias itself is transactional and idempotent.
+        """
+        logical = scope_key(plan, policy_version)
+        alias = db.execute('SELECT stored_scope FROM scope_aliases WHERE policy_scope=?', (logical,)).fetchone()
+        if alias:
+            return alias[0]
+        for version in compatible_legacy_versions(policy_version):
+            old = _key({'plan': _scope_config(plan), 'rule_source_version': version})
+            exists = db.execute('SELECT 1 FROM runs WHERE scope=? UNION ALL SELECT 1 FROM incidents WHERE scope=? LIMIT 1', (old, old)).fetchone()
+            if exists:
+                db.execute('INSERT OR IGNORE INTO scope_aliases VALUES(?,?)', (logical, old))
+                return old
+        return logical
+
+    def scope_for(self, plan):
+        with self._db() as db:
+            return self._resolve_scope(db, plan, diagnostic_policy_version())
+
     def _queue(self, db, plan, run_id, events, evidence):
         if not events or plan.get('mode') != 'live' or plan.get('shadow', True):
             return
@@ -115,11 +141,12 @@ class MonitorStore:
         if start >= end:
             raise ValueError('Window end is exclusive and must be after start')
         source_version = rule_source_version()
-        scope = scope_key(plan)
-        run_id = _key([scope, window_start, window_end])
+        policy_version = diagnostic_policy_version()
         token, now = str(uuid.uuid4()), time.time()
         with self._db() as db:
             db.execute('BEGIN IMMEDIATE')
+            scope = self._resolve_scope(db, plan, policy_version)
+            run_id = _key([scope, window_start, window_end])
             old = db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone()
             if old and old['status'] == 'running' and old['lease_until'] > now:
                 return self._run_row(old)
@@ -150,6 +177,8 @@ class MonitorStore:
             evaluated_version = result['evidence'].get('rule_version')
             if rule_source_version() != source_version or (evaluated_version and not source_version.startswith(evaluated_version)):
                 raise ValueError('Rule configuration changed during evaluation')
+            if diagnostic_policy_version() != policy_version or result['evidence'].get('policy_version', policy_version) != policy_version:
+                raise ValueError('Diagnostic policy changed during evaluation')
             seen = set()
             for f in result['findings']:
                 for field in ('key', 'rule', 'object', 'value', 'evidence'):
@@ -198,7 +227,7 @@ class MonitorStore:
                     baseline = old_i.get('notified_value', old_i['value']) if old_i else f['value']
                     if old_i and event is None and isinstance(threshold, (int, float)) and threshold > 0 and f['value'] - baseline >= threshold:
                         event = 'worsening'
-                    item = {**f, 'run_id': run_id, 'evidence': {**f['evidence'], 'run_id': run_id}, 'id': iid, 'scope': scope, 'plan_id': plan['id'], 'mode': plan['mode'], 'version': plan.get('version', 1), 'rule_source_version': source_version, 'window_start': window_start, 'window_end': window_end, 'first_seen': old_i['first_seen'] if old_i else now, 'last_seen': now, 'status': 'open', 'notified_value': f['value'] if event else baseline}
+                    item = {**f, 'run_id': run_id, 'evidence': {**f['evidence'], 'run_id': run_id}, 'id': iid, 'scope': scope, 'plan_id': plan['id'], 'mode': plan['mode'], 'version': plan.get('version', 1), 'rule_source_version': source_version, 'policy_version': policy_version, 'window_start': window_start, 'window_end': window_end, 'first_seen': old_i['first_seen'] if old_i else now, 'last_seen': now, 'status': 'open', 'notified_value': f['value'] if event else baseline}
                     db.execute('INSERT OR REPLACE INTO incidents VALUES(?,?,?,?,?,?)', (iid, scope, window_start, window_end, 'open', _json(item)))
                     if event:
                         record = {'type': event, 'run_id': run_id, 'incident_id': iid, 'at': now, 'value': f['value'], 'rule': f['rule'], 'object': f['object'], 'window_start': window_start, 'window_end': window_end}
@@ -208,43 +237,46 @@ class MonitorStore:
                     if row['id'] in active_ids:
                         continue
                     item = json.loads(row['body'])
-                    item.update(status='recovered', last_seen=now, run_id=run_id, evidence={**item['evidence'], 'run_id': run_id})
+                    item.update(status='recovered', last_seen=now, run_id=run_id, rule_source_version=source_version, policy_version=policy_version, evidence={**item['evidence'], 'run_id': run_id})
                     record = {'type': 'recovered', 'run_id': run_id, 'incident_id': row['id'], 'at': now, 'window_start': window_start, 'window_end': window_end}
                     events.append(record)
                     db.execute('UPDATE incidents SET status=?,body=? WHERE id=?', ('recovered', _json(item), row['id']))
                     db.execute('INSERT INTO history(incident_id,body) VALUES(?,?)', (row['id'], _json(record)))
-            body = {'mode': plan['mode'], 'rule_source_version': source_version, 'evidence': result['evidence'], 'events': events, 'error': error, 'attempt_history': previous.get('attempt_history', []) + [{'attempt': attempts, 'at': now, 'status': 'failed' if error else 'succeeded', 'error': error}]}
+            body = {'mode': plan['mode'], 'rule_source_version': source_version, 'policy_version': policy_version, 'evidence': result['evidence'], 'events': events, 'error': error, 'attempt_history': previous.get('attempt_history', []) + [{'attempt': attempts, 'at': now, 'status': 'failed' if error else 'succeeded', 'error': error, 'rule_source_version': source_version, 'policy_version': policy_version}]}
             db.execute('UPDATE runs SET status=?,lease_until=0,updated=?,body=? WHERE id=?', ('failed' if error else 'succeeded', time.time(), _json(body), run_id))
             self._queue(db, plan, run_id, events, result['evidence'])
             return self._run_row(db.execute('SELECT * FROM runs WHERE id=?', (run_id,)).fetchone())
 
     def open_windows(self, plan):
         with self._db() as db:
-            return [(r[0], r[1]) for r in db.execute('SELECT DISTINCT window_start,window_end FROM incidents WHERE scope=? AND status=?', (scope_key(plan), 'open'))]
+            scope = self._resolve_scope(db, plan, diagnostic_policy_version())
+            return [(r[0], r[1]) for r in db.execute('SELECT DISTINCT window_start,window_end FROM incidents WHERE scope=? AND status=?', (scope, 'open'))]
 
     def due_windows(self, now=None):
         local = (now or datetime.now(ZoneInfo('America/New_York'))).astimezone(ZoneInfo('America/New_York'))
         runs = {r['id']: r for r in self.runs()}
+        source_version = rule_source_version()
         due = []
         for plan in self.plans():
             try:
                 if not plan['enabled'] or (local.hour, local.minute) < (int(plan['hour']), int(plan['minute'])):
                     continue
                 windows = set(self.open_windows(plan))
+                scope = self.scope_for(plan)
                 for offset in range(1, int(plan['lookback_days']) + 1):
                     day = (local.date() - timedelta(days=offset)).isoformat()
                     end = (local.date() - timedelta(days=offset - 1)).isoformat()
                     windows.add((day, end))
                 # Interrupted/failed windows survive restarts even when outside lookback.
                 for r in runs.values():
-                    if r['scope'] == scope_key(plan) and r['status'] in ('running', 'failed'):
+                    if r['scope'] == scope and r['status'] in ('running', 'failed'):
                         windows.add((r['window_start'], r['window_end']))
                 for start, end in sorted(windows):
-                    r = runs.get(_key([scope_key(plan), start, end]))
+                    r = runs.get(_key([scope, start, end]))
                     checked_today = r and datetime.fromtimestamp(r['updated'], ZoneInfo('America/New_York')).date() == local.date()
                     if r and r['status'] == 'running' and r['lease_until'] > local.timestamp():
                         continue
-                    if checked_today and r['status'] == 'succeeded':
+                    if checked_today and r['status'] == 'succeeded' and r.get('rule_source_version') == source_version:
                         continue
                     if r and r['status'] == 'failed' and local.timestamp() - r['updated'] < 300:
                         continue

@@ -4,6 +4,7 @@ import calendar
 import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
+from bi_check_agent.rule_catalog import RULES
 
 from bi_check_agent.parser_schema import (
     DIMENSION_ALIASES,
@@ -206,6 +207,9 @@ def fallback_parse(description: str) -> dict:
     if dims:
         result["aggregation_dimensions"] = dims
         result["aggregation_dimensions_source"] = "user_specified"
+    elif any(RULES[rule].level == 'aggregate' for rule in rules):
+        result["aggregation_dimensions"] = ["marketplace", "store", "sku", "day"]
+        result["aggregation_dimensions_source"] = "derived_from_rule_grain"
     elif result.get("sku"):
         result["aggregation_dimensions"] = ["sku"]
         result["aggregation_dimensions_source"] = "derived_from_sku_filter"
@@ -216,6 +220,7 @@ def fallback_parse(description: str) -> dict:
         result["aggregation_dimensions"] = ["main_ir"]
         result["aggregation_dimensions_source"] = "derived_from_main_ir_filter"
     else:
+        result["aggregation_dimensions"] = ["main_ir"]
         result["aggregation_dimensions_source"] = "default_main_ir_when_empty"
     for required in ["start_date", "end_date"]:
         if not result.get(required):

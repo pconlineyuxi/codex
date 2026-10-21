@@ -1,0 +1,83 @@
+flowchart TB
+  BA["BA 使用者"]
+  START["scripts/start.sh<br/>启动两个本地进程"]
+  subgraph WEB["交互入口 · Streamlit 进程"]
+    APP["app.py → ui.py<br/>查询、手动巡查、计划与历史"]
+    PUI["profit_ui.py<br/>利润对比页面"]
+    PARSE["ai_parser.py<br/>业务描述 → 查询草稿"]
+    FALLBACK["parser_rules.py + parser_schema.py<br/>日期规则、字段白名单、解析兜底"]
+  end
+  subgraph JOB["后台入口 · worker 进程"]
+    WORKER["worker.py<br/>轮询到期计划与复查窗口"]
+  end
+  subgraph LOGIC["共享 Python 模块 · 函数调用，不是独立网络服务"]
+    MON["monitor.py · MonitorStore<br/>计划、执行锁、异常状态、通知队列"]
+    MODEL["models.py<br/>校验查询参数"]
+    SVC["service.py<br/>查询编排、模式与完整性检查、证据、利润拆解"]
+    CORE["core.py<br/>固定过滤、SQL 构建、聚合、异常规则"]
+    DB["db.py<br/>SQLAlchemy 只读查询"]
+    PA["profit_analysis.py<br/>两期比较、数据快照、AI 问答与证据校验"]
+    SA["source_analysis.py<br/>对白名单字段执行本地 Pandas 分析"]
+    NOTICE["notifications.py<br/>有条件发送飞书通知"]
+  end
+  subgraph DATA["外部服务与数据存储"]
+    PG[("PostgreSQL<br/>Product Profit 结果视图")]
+    LLM["OpenAI API<br/>解析草稿 / 选择分析工具 / 解释结果"]
+    SQLITE[("本地 SQLite<br/>plans · runs · incidents · history<br/>outbox · failures")]
+    SESSION["Streamlit session_state<br/>源 DataFrame、结果快照、对话"]
+    JSON["本地 manual-scans/*.json<br/>手动巡查凭据与汇总"]
+    FEISHU["飞书 API<br/>需显式启用与接收人确认"]
+  end
+  subgraph SUPPORT["共同约束与配置"]
+    CFG["diagnostic_rules.yaml + filter_mapping.yaml<br/>阈值、业务约束、字段映射"]
+    VER["versioning.py<br/>计算口径与实现版本指纹"]
+    ENV[".env<br/>连接、模型、资源限制、通知开关"]
+    READY["PROFIT_READY_FILE<br/>正式模式使用的刷新就绪凭据"]
+  end
+  BA --> APP
+  START --> APP
+  START --> WORKER
+  APP --> PUI
+  APP --> PARSE
+  PARSE --> FALLBACK
+  PARSE --> LLM
+  APP --> MODEL
+  APP -->|查询 / 手动巡查| SVC
+  PUI --> PA
+  APP -->|结果追问| PA
+  PA -->|两期查询与利润拆解| SVC
+  PA -->|工具调用与解释| LLM
+  PA --> SA
+  APP -->|计划管理 / 历史 / 执行计划| MON
+  WORKER -->|run / dispatch| MON
+  MON -->|执行传入的 evaluate_plan| SVC
+  MON --> SQLITE
+  MON --> NOTICE
+  NOTICE --> FEISHU
+  SVC --> CORE
+  SVC --> DB
+  DB --> PG
+  CORE -.-> CFG
+  SVC -.-> MODEL
+  SVC -.-> READY
+  SVC -.-> VER
+  MON -.-> VER
+  APP -.-> VER
+  ENV -.-> DB
+  ENV -.-> PA
+  ENV -.-> PARSE
+  ENV -.-> NOTICE
+  APP -->|保存本次源记录与结果| SESSION
+  PUI -->|保存两期快照与对话| SESSION
+  SESSION -->|传入快照中的源记录| SA
+  APP -->|仅手动巡查| JSON
+  classDef ui fill:#e8f1ff,stroke:#3773bd,color:#15324f
+  classDef logic fill:#e5f5ef,stroke:#268264,color:#163e31
+  classDef ai fill:#f0eaff,stroke:#805abd,color:#392452
+  classDef data fill:#fff3dc,stroke:#bf8b29,color:#624410
+  classDef cfg fill:#f2f4f7,stroke:#8391a1,color:#334155
+  class APP,PUI,WORKER,START ui
+  class SVC,CORE,DB,MON,MODEL,NOTICE logic
+  class PARSE,FALLBACK,PA,SA,LLM ai
+  class PG,SQLITE,SESSION,JSON,FEISHU data
+  class CFG,VER,ENV,READY cfg

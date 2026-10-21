@@ -8,6 +8,7 @@ import pandas as pd
 import yaml
 
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.rule_catalog import RULES
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG_DIR = ROOT / "config"
@@ -25,25 +26,7 @@ ORDER_LINE_DETAIL_COLUMNS = [
     "gross_sales", "promo_cost", "sales", "units", "product_cost_unit", "hardware_cost",
     "removed_hardware", "unit_cost", "order_cost_total", "commission", "ad_spend", "shipping_fee",
 ]
-ANOMALY_RULE_LABELS = {
-    "zero_units_with_sales": "Units = 0 but Sales != 0",
-    "zero_sales_with_units": "Sales = 0 but Units != 0",
-    "negative_units": "Units < 0",
-    "negative_sales": "Sales < 0",
-    "negative_shipping_fee": "Shipping Fee < 0",
-    "negative_promotion": "Raw promotion < 0 (review sign convention)",
-    "negative_commission": "Commission < 0",
-    "negative_ad_spend": "Ad Spend < 0",
-    "missing_product_cost": "Missing / non-positive product cost",
-    "unit_cost_non_positive": "Unit cost <= 0",
-    "removed_hardware_abnormal": "Removed hardware > product cost + hardware cost",
-    "shipping_cost_ratio_high": "Shipping Fee / Sales high",
-    "unit_shipping_fee_high": "Shipping Fee / Units high",
-    "promotion_ratio_high": "Promotion / Sales high",
-    "ad_spend_ratio_high": "Ad Spend / Sales high",
-    "ad_spend_without_sales": "Ad Spend > 0 with Sales = 0",
-    "profit_rate_with_ads_ship_high": "Profit rate with Ads & Ship > 1",
-}
+ANOMALY_RULE_LABELS = {key: rule.label_en for key, rule in RULES.items()}
 
 
 def load_yaml(name: str) -> dict[str, Any]:
@@ -259,9 +242,9 @@ def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None) 
             "missing_product_cost": pd.isna(product_cost) or product_cost <= 0,
             "unit_cost_non_positive": unit_cost <= 0,
             "removed_hardware_abnormal": removed > (product_cost + hardware),
-            "shipping_cost_ratio_high": sales > 0 and shipping / sales > thresholds.get("shipping_cost_ratio_high", 0.5),
-            "unit_shipping_fee_high": units > 0 and shipping / units > thresholds.get("unit_shipping_fee_high", 80),
-            "promotion_ratio_high": sales > 0 and promo / sales > thresholds.get("promotion_ratio_high", 0.5),
+            "shipping_cost_ratio_high": sales > 0 and shipping / sales > thresholds["shipping_cost_ratio_high"],
+            "unit_shipping_fee_high": units > 0 and shipping / units > thresholds["unit_shipping_fee_high"],
+            "promotion_ratio_high": sales > 0 and promo / sales > thresholds["promotion_ratio_high"],
         }
         for rule in rules:
             if rule == "promotion_ratio_high" and str(row.get("market_place", "")).lower() not in {x.lower() for x in cfg.get("rule_guards", {}).get(rule, {}).get("skip_when_marketplace_not_in", [])}:
@@ -275,17 +258,17 @@ def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None) 
             r["business_guard_notes"] = " | ".join(sorted(set(notes)))
             anomaly_rows.append(r)
     # Aggregate-only ad/profit rules by selected dimensions can still surface as aggregate samples.
-    if any(r in rules for r in ["negative_ad_spend", "ad_spend_ratio_high", "ad_spend_without_sales", "profit_rate_with_ads_ship_high"]):
+    if any(RULES[r].level == "aggregate" for r in rules):
         agg = aggregate_product(d, ["marketplace", "store", "sku", "day"])
         for _, row in agg.iterrows():
             hits, notes = [], []
             if "negative_ad_spend" in rules and row.get("Ads cost", 0) < 0:
                 hits.append("negative_ad_spend")
-            if "ad_spend_ratio_high" in rules and row.get("Sales", 0) > 0 and row.get("Ads cost", 0) / row.get("Sales", 1) > thresholds.get("ad_spend_ratio_high", 0.1):
+            if "ad_spend_ratio_high" in rules and row.get("Sales", 0) > 0 and row.get("Ads cost", 0) / row.get("Sales", 1) > thresholds["ad_spend_ratio_high"]:
                 hits.append("ad_spend_ratio_high")
             if "ad_spend_without_sales" in rules and row.get("Sales", 0) == 0 and row.get("Ads cost", 0) > 0:
                 hits.append("ad_spend_without_sales")
-            if "profit_rate_with_ads_ship_high" in rules and row.get("Profit rate with Ads & Ship", 0) > thresholds.get("profit_rate_with_ads_ship_high", 1.0):
+            if "profit_rate_with_ads_ship_high" in rules and row.get("Profit rate with Ads & Ship", 0) > thresholds["profit_rate_with_ads_ship_high"]:
                 hits.append("profit_rate_with_ads_ship_high")
             if hits:
                 r = row.to_dict()

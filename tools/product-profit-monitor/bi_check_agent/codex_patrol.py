@@ -16,18 +16,15 @@ import pandas as pd
 from dotenv import load_dotenv
 from bi_check_agent import core, service, lifecycle_patrol
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.rule_catalog import rules_with_tag
 
 ROOT = Path(__file__).resolve().parents[1]
 ZONE = ZoneInfo('America/New_York')
-DATA_RULES = {'zero_units_with_sales', 'zero_sales_with_units', 'missing_product_cost',
-              'unit_cost_non_positive', 'removed_hardware_abnormal', 'profit_rate_with_ads_ship_high'}
-CORE_RULES = ['missing_product_cost', 'shipping_cost_ratio_high', 'ad_spend_without_sales']
+DATA_RULES = list(rules_with_tag('patrol_data_issue'))
+CORE_RULES = list(rules_with_tag('default_patrol'))
 LIMITATION = '刷新完整性、源币种及源日期时区未核实；本次为只读核查，不判定数据通过或正式异常恢复。'
-SALES_RULES = {'zero_units_with_sales', 'zero_sales_with_units', 'negative_sales',
-               'shipping_cost_ratio_high', 'promotion_ratio_high', 'ad_spend_ratio_high',
-               'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}
-COST_RULES = {'missing_product_cost', 'unit_cost_non_positive', 'removed_hardware_abnormal',
-              'profit_rate_with_ads_ship_high'}
+SALES_RULES = list(rules_with_tag('awaits_sales'))
+COST_RULES = list(rules_with_tag('awaits_cost'))
 MATURITY_NOTE = ('订单/广告日期观察不能替代创建/出库批次复核。下方原始条件命中保留为观察；'
                  '销售和成本另按创建日、实际扫描出库日以及预期补齐时限复核。'
                  '尚未接入补跑任务成功凭据，超过预期时点仍命中也只能列为疑点。')
@@ -41,7 +38,7 @@ def maturity_reason(rule, mode):
         reasons.append('本表按订单日期观察；创建日的预期时限复核见上方，补跑成功凭据未接入')
     if rule in COST_RULES:
         reasons.append('本表未按商品实际出库筛选；出库日的预期时限复核见上方，成本批次成功凭据未接入')
-    if rule in {'ad_spend_ratio_high', 'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}:
+    if rule in rules_with_tag('awaits_ads'):
         reasons.append('广告批次完整性未核实；同日账面销售不是广告归因销售')
     return '；'.join(reasons)
 

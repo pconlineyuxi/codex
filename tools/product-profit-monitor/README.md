@@ -93,3 +93,7 @@ Codex 使用 [product-profit-patrol 技能](codex-skills/product-profit-patrol/S
 
 
 所有查询、巡查、利润分析和平台/店铺选项加载均固定应用 `main_ir NOT IN ('SHIPPING FEE', 'SHIPMENT DISCOUNT', 'GIFT WRAPPER FEE', 'PROMOTION DISCOUNT')`，页面业务筛选不能覆盖此条件。SQL NOT IN 同时排除 NULL main_ir。AI 使用同一查询返回的筛选后源记录。更新此口径后，旧会话结果和源数据上下文失效，需要重新查询或巡查。
+
+## 内部结构与版本维护
+
+规则元数据统一维护在 `config/diagnostic_rules.yaml`；查询结果与分析快照由 `bi_check_agent/contracts.py` 校验。代码版本用于审计和缓存，业务版本用于巡查身份。修改业务计算公式或固定 SQL 口径时必须递增 `POLICY_REVISION`，更新代码与规则目录后重启页面和巡查进程。兼容范围、历史记录处理及验收说明见 [内部结构整理](docs/superpowers/specs/2026-10-21-internal-contracts-design.md)。
