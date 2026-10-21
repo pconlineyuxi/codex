@@ -14,7 +14,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dotenv import load_dotenv
-from bi_check_agent import core, service
+from bi_check_agent import core, service, lifecycle_patrol
 from bi_check_agent.models import AnomalyQueryRequest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -28,9 +28,9 @@ SALES_RULES = {'zero_units_with_sales', 'zero_sales_with_units', 'negative_sales
                'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}
 COST_RULES = {'missing_product_cost', 'unit_cost_non_positive', 'removed_hardware_abnormal',
               'profit_rate_with_ads_ship_high'}
-MATURITY_NOTE = ('销售额在订单进入后补跑；成本在实际出库后的夜间批次写入。当前取数仅按订单/广告日期，'
-                 '未接入出库时间和补跑任务覆盖凭据，无法判断是否已到应有数据的时点。'
-                 '受影响规则仅保留条件命中观察，不据此告警；未命中也不能判为正常。')
+MATURITY_NOTE = ('订单/广告日期观察不能替代创建/出库批次复核。下方原始条件命中保留为观察；'
+                 '销售和成本另按创建日、实际扫描出库日以及预期补齐时限复核。'
+                 '尚未接入补跑任务成功凭据，超过预期时点仍命中也只能列为疑点。')
 
 
 def maturity_reason(rule, mode):
@@ -38,9 +38,9 @@ def maturity_reason(rule, mode):
         return ''
     reasons = []
     if rule in SALES_RULES:
-        reasons.append('销售额补充任务完成且覆盖该订单的凭据未接入')
+        reasons.append('本表按订单日期观察；创建日的预期时限复核见上方，补跑成功凭据未接入')
     if rule in COST_RULES:
-        reasons.append('实际出库时间及覆盖该出库批次的成本写入凭据未接入')
+        reasons.append('本表未按商品实际出库筛选；出库日的预期时限复核见上方，成本批次成功凭据未接入')
     if rule in {'ad_spend_ratio_high', 'ad_spend_without_sales', 'profit_rate_with_ads_ship_high'}:
         reasons.append('广告批次完整性未核实；同日账面销售不是广告归因销售')
     return '；'.join(reasons)
@@ -72,11 +72,12 @@ def previous_day(now=None):
     return current.astimezone(ZONE).date() - timedelta(days=1)
 
 
-def build_report(day, rules, mode='review', query_fn=None):
+def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None):
     if mode not in {'review', 'verified', 'demo'}:
         raise ValueError('未知巡查模式')
     request = AnomalyQueryRequest(start_date=day, end_date=day+timedelta(days=1),
         anomaly_rules=rules, aggregation_dimensions=['marketplace', 'store', 'sku', 'day'])
+    run_lifecycle = mode != 'demo' and (query_fn is None or lifecycle_fn is not None)
     query_fn = query_fn or service.query
     result = query_fn(request, {'review':'live_test', 'verified':'live', 'demo':'demo'}[mode])
     evidence = result['evidence']
@@ -98,7 +99,19 @@ def build_report(day, rules, mode='review', query_fn=None):
     empty = not evidence['row_count']
     unknown = bool(evidence.get('unknown_rule_inputs'))
     has_observations = any(r['hit_count'] and not r['pending_reason'] for r in rule_summary)
-    status = 'empty_unverified' if empty else ('partial_assessment' if unknown else (
+    lifecycle = None
+    if run_lifecycle:
+        try:
+            lifecycle = (lifecycle_fn or lifecycle_patrol.review)(day, rules)
+        except Exception:
+            lifecycle = {'status':'failed','job_completion_verified':False,
+                'note':'创建/出库时间复核未完成，请核查只读来源、关联字段与读取上限；未输出原始连接错误。'}
+        if lifecycle['status'] in {'failed','partial_assessment','empty_unverified'}:
+            unknown = True
+        if lifecycle['status'] != 'failed':
+            has_observations |= any(any(lifecycle[name]['rule_counts'].values()) for name in ['sales','cost'])
+            empty = empty and not any(lifecycle[name]['candidate_lines'] for name in ['sales','cost'])
+    status = 'partial_assessment' if unknown else ('empty_unverified' if empty else (
         'observations' if has_observations else ('maturity_unverified' if mode != 'demo' else 'no_hits')))
     return {'schema_version':2, 'mode':mode, 'status':status, 'query_succeeded':True,
         'checked_at':datetime.now(timezone.utc).isoformat(),
@@ -107,6 +120,7 @@ def build_report(day, rules, mode='review', query_fn=None):
         'source_record_count':evidence['row_count'], 'rules':rule_summary,
         'finding_groups':findings, 'finding_group_count':len(findings),
         'advertising_observation':advertising_observation(result['rows'], findings),
+        'lifecycle_review':lifecycle,
         'evidence':evidence, 'limitations':([LIMITATION, MATURITY_NOTE] if mode=='review' else ([MATURITY_NOTE] if mode=='verified' else ['演示合成样本，不代表公司实际数据。'])),
         'interpretation':'这里统计规则条件命中，不是已确认异常。不同规则可能命中同一记录，命中数不能相加当作订单数；来源记录与广告分组不可混加。'}
 
@@ -133,6 +147,8 @@ def meaningful_signature(report):
     payload = {'mode':report['mode'],'status':report['status'],'error':report.get('error'),
         'rules':rules,'groups':sorted(groups,key=lambda x:json.dumps(x,sort_keys=True)),
         'rule_version':report.get('evidence',{}).get('rule_version'), 'scope':report.get('scope')}
+    if report.get('lifecycle_review'):
+        payload['lifecycle_review'] = lifecycle_patrol.signature_payload(report['lifecycle_review'])
     return sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 
@@ -159,7 +175,10 @@ def markdown_report(report):
     lines.extend(report.get('limitations',[]))
     if not report['query_succeeded']:
         return '\n'.join(lines+['',report['error']['message'],''])
-    lines += ['',f"检查 {report['source_record_count']} 条来源记录，执行 {len(report['rules'])} 条规则；覆盖全部平台、店铺。",'',
+    if report.get('lifecycle_review'):
+        lines += lifecycle_patrol.markdown(report['lifecycle_review'])
+    lines += ['', '## 按订单/广告日期保留的辅助观察', '',
+        f"检查 {report['source_record_count']} 条来源记录，执行 {len(report['rules'])} 条规则；覆盖全部平台、店铺。",'',
         '固定排除四类费用/折扣 main_ir 及 NULL main_ir。', '', report['interpretation'],'',
         '| 规则 | 判断状态 | 条件命中数 | 计数单位 | 尚缺依据 |','| --- | --- | ---: | --- | --- |']
     for row in report['rules']:
