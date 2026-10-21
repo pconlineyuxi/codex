@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 import pytest
+import pandas as pd
 import yaml
 
 from bi_check_agent import core, service, parser_schema, profit_analysis
@@ -137,3 +138,19 @@ def test_pre_refactor_demo_sql_frames_findings_and_profit_are_unchanged(monkeypa
                       aggregation_dimensions=req.aggregation_dimensions)
     previous = AnomalyQueryRequest(**{**current.model_dump(mode='json'), 'start_date': '2026-08-30', 'end_date': '2026-09-01'})
     assert profit_analysis.compare(current, previous, 'demo')['report'] == baseline['comparison']
+
+
+def test_equal_profit_groups_keep_deterministic_dimension_order():
+    base = service.demo_rows(request(sku=['DEMO-HEALTHY'])).iloc[0].to_dict()
+    # Interleaved profit levels expose the unstable quicksort tie order even
+    # where the small golden fixture happens to retain its original order.
+    rows = pd.DataFrame([
+        {**base, 'sku': f'SKU-{i:02d}', 'sales': float((i % 3 + 1) * 100)}
+        for i in range(40)
+    ])
+    expected_skus = [f'SKU-{i:02d}' for remainder in (2, 1, 0)
+                     for i in range(40) if i % 3 == remainder]
+    for source in (rows, rows.iloc[::-1]):
+        actual = core.aggregate_product(source, ['sku'])
+        assert actual['sku'].tolist() == expected_skus
+        assert actual['Profit with Ads & Ship'].is_monotonic_decreasing

@@ -196,7 +196,8 @@ def aggregate_product(df: pd.DataFrame, dimensions: list[str] | None = None) -> 
     g["Profit with Ads & Ship"] = (g["Profit with Ads"] - g["Shipping Fee"]).round(2)
     g["Profit rate with Ads & Ship"] = (g["Profit with Ads & Ship"] / g["Sales"].replace({0: float("nan")})).round(4)
     cols = group_cols + ["Sales", "Units", "Promo cost", "Shipping Fee", "Ads cost", "Tacos", "Profit wo Ads", "Profit with Ads", "Profit with Ads & Ship", "Profit rate with Ads & Ship"]
-    return g[cols].sort_values(cols[-2] if cols[-2] in g.columns else group_cols[0], ascending=False)
+    # Preserve the group-key order for equal profits across NumPy/OS builds.
+    return g[cols].sort_values(cols[-2] if cols[-2] in g.columns else group_cols[0], ascending=False, kind="stable")
 
 
 def _business_guard_notes(row: pd.Series, rule: str, cfg: dict[str, Any]) -> list[str]:
