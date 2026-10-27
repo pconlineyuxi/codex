@@ -39,6 +39,40 @@ def _err(exc):
         st.error('本次操作未完成，请检查本地服务配置。未将失败判定为检查通过。')
 
 
+def diagnostic_results(evidence,namespace):
+    from bi_check_agent.diagnostics import public
+    report=public(evidence.get('diagnostics'))
+    if not report:return
+    st.markdown('**适用条件与原因核查**')
+    st.caption('网页、计划与 Codex 使用同一套判定。以下按平台、店铺、SKU、日汇总；同一对象命中多条规则不重复计入各状态的对象数，不同状态间也可能重叠。')
+    if report.get('source_error'):st.warning(report['source_error'])
+    items=report['assessments']
+    if not items:
+        st.info('本次没有规则候选；不代表数据已通过完整性验证。')
+        return
+    frame=pd.DataFrame([{'平台':i['market_place'],'店铺':i['store'],'SKU':i['sku'],'日期':i['day'],
+        '规则':RULE_LABELS[i['rule']],'判定':i['assessment_label'],'命中数':i['count'],
+        '已验证事实与定位':i['conclusion'],'原因状态':'待验证' if i['cause_status']=='pending' else '尚未确认',
+        '尚缺证据':'；'.join(i['missing_evidence'])} for i in items])
+    st.dataframe(frame,width='stretch',hide_index=True)
+    with st.expander('核查证据与 BA 核实记录'):
+        st.json(report)
+        identity=__import__('hashlib').sha256(json.dumps(evidence,sort_keys=True,default=str).encode()).hexdigest()
+        choices={i['evidence_id']:i for i in items}
+        selected=st.selectbox('选择核实分组',list(choices),format_func=lambda key:str(choices[key]['sku'] or '未提供SKU')+' · '+RULE_LABELS[choices[key]['rule']],key=namespace+'_review_item')
+        labels={'unknown':'证据不足','waiting_data':'等待数据补齐','normal':'已核实为正常业务','confirmed_error':'已核实为真实错误'}
+        label=st.selectbox('BA 核实结论',list(labels),format_func=labels.get,key=namespace+'_review_label')
+        note=st.text_area('核实依据',max_chars=4000,key=namespace+'_review_note')
+        if st.button('保存核实记录',key=namespace+'_save_review'):
+            try:
+                MonitorStore().save_review(identity,selected,evidence['mode'],label,note)
+                st.success('核实记录已保存。规则调整需复核后实施。')
+            except Exception as exc:_err(exc)
+        saved=[r for r in MonitorStore().reviews(evidence['mode']) if r['analysis_id']==identity]
+        if saved:
+            st.dataframe(pd.DataFrame([{'核实结果':labels[r['label']],'依据':r['note']} for r in saved]),hide_index=True,width='stretch')
+
+
 def manual_scan(store, mode):
     st.markdown('**手动巡查**')
     saved=[p for p in store.plans() if p.get('mode')==('live' if mode=='live_test' else mode)]
@@ -86,7 +120,10 @@ def manual_scan(store, mode):
         st.caption(f"检查范围 {record['evidence']['start']} — {record['evidence']['end']} · {record['evidence']['row_count']} 条来源记录")
         frame=pd.DataFrame(record['summary'])
         if frame.empty: st.info('所选规则未命中；数据完整性仍以查询凭据为准。')
-        else: st.dataframe(frame,width='stretch',hide_index=True)
+        else:
+            st.caption('规则候选汇总：是否需要处理，请结合下方适用条件与原因核查。')
+            st.dataframe(frame,width='stretch',hide_index=True)
+        diagnostic_results(record['evidence'],'manual')
         st.download_button('下载手动巡查记录',json.dumps(record,ensure_ascii=False,indent=2,default=str),'manual-scan.json','application/json')
         scan_questions(record,mode,signature)
 
@@ -278,11 +315,12 @@ def queries(mode):
             st.warning('部分规则所需字段缺失，本次不能确认这些规则通过。请查看查询凭据中的 unknown_rule_inputs。')
         if result['anomalies'].empty:st.info('未命中所选规则；未选规则或无数据时不代表数据正确。')
         else:
-            st.markdown('**疑似异常与经营信号**')
+            st.markdown('**规则候选汇总**')
             summary=summarize_findings(result['anomalies'],result['evidence']['query']['aggregation_dimensions'])
             st.dataframe(summary,width='stretch',hide_index=True)
             _csv('下载异常汇总',summary,'profit-findings-summary.csv')
         st.info(result['evidence']['localization_limit'])
+        diagnostic_results(result['evidence'],'query')
         with st.expander('查询凭据'):
             st.json(result['evidence'])
         # Existing query sessions already retain source rows, so enable chat
@@ -324,6 +362,7 @@ def history(store,mode):
     detail=without_order_samples(store.incident(selected))
     st.write('状态：'+('待核查' if detail['status']=='open' else '已恢复'))
     st.json(detail.get('evidence',{}))
+    diagnostic_results(detail.get('evidence',{}).get('query_evidence',{}),'history')
     st.markdown('**检查历史**');st.json(detail.get('history',[]))
     st.download_button('下载异常凭据',json.dumps(detail,ensure_ascii=False,indent=2,default=str),'incident.json','application/json')
 

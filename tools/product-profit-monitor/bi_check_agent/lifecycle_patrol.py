@@ -123,11 +123,14 @@ def review(day, selected_rules, now=None, fetch_fn=None):
     sales, cost, source = fetch_fn(day)
     sales_due = datetime.combine(day+timedelta(days=1), time(), ZONE)
     cost_due = datetime.combine(day+timedelta(days=1), time(9), ZONE)
+    from bi_check_agent.diagnostics import cost_due as reached_cost_deadline
+    # Use the same deadline function as interactive and worker assessments.
+    end_of_day_scan = utc_bounds(day)[1] - timedelta(microseconds=1)
     sales_rules = [r for r in SALES_RULES if r in selected_rules]
     cost_rules = [r for r in COST_RULES if r in selected_rules]
     sales_result = _evaluate(sales.get('order_line_id',[]),source,sales_rules,day,current>=sales_due)
     unique_cost = cost[cost.line_matches==1] if not cost.empty else cost
-    cost_result = _evaluate(unique_cost.get('order_line_id',[]),source,cost_rules,day,current>=cost_due)
+    cost_result = _evaluate(unique_cost.get('order_line_id',[]),source,cost_rules,day,reached_cost_deadline(end_of_day_scan,current))
     cost_result.update({'candidate_order_products':len(cost),
         'unmatched_order_products':int((cost.line_matches==0).sum()) if not cost.empty else 0,
         'ambiguous_order_products':int((cost.line_matches>1).sum()) if not cost.empty else 0,

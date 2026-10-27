@@ -12,6 +12,7 @@ from bi_check_agent.ai_errors import AIServiceError, failure_detail
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent.contracts import AnalysisSnapshot
 from bi_check_agent.source_analysis import source_frames, analyze, TOOL, COLUMNS, public_evidence
+from bi_check_agent import diagnostics
 
 
 def previous_equal_period(start: date, end: date):
@@ -81,6 +82,7 @@ def context_for(snapshot, question, history=()):
             'rule_definitions':service.core.load_yaml('diagnostic_rules.yaml'),
             'rule_findings':snapshot['rule_findings'][:100],
             'rule_findings_coverage':{'total':len(snapshot['rule_findings']),'included':min(100,len(snapshot['rule_findings']))},
+            'diagnostics':diagnostics.public(snapshot['current_evidence'].get('diagnostics')),
             'limitations':['只有本次巡查时期，没有对比期；请使用 current 进行分析，不能虚构两期变化。',
                 '规则命中不等于已确认错误；请对完整源记录验证追问，不把汇总样本数量当作全部源数据。',
                 'profit=gross_sales-promo_cost-order_cost_total-commission-ad_spend-shipping_fee；sales 已扣促销。',
@@ -118,19 +120,31 @@ sample 是最多30条相关源行，不能据样本做总体比例或归因；�
 页面不提供订单行列表，不在回答中倾倒逐行明细或订单号；可概括发现，指出 SKU/店铺/日期、证据编号和核查方向。
 这是结果视图，不是上游源系统，不能把相关性、金额差异或异常规则命中当作已证实根因。
 如果字段不在 available_fields 中或证据不足，请明确说明缺口，不猜测。回答聚焦用户的问题。"""
+SYSTEM_PROMPT += """
+询问原因或成本补齐时，请调用 review_diagnostic_evidence 核对共用的适用条件和来源事实。
+cause_status=pending/unresolved 表示原因尚未确认，不能据此声称任务失败。区分已验证的数据差异与尚未验证的原因。
+数字仅复述本轮工具实际返回的值，可按两位小数展示；不要自行推导工具没有返回的数字。
+金额和数量均值不是本工具利润计算方式；利润计算按订单成本、广告费用等分别加总。
+没有销售与退款抵消的已确认业务情形，不用这一假设解释异常。
+"""
 
 
 def validate_answer(content, evidence, finish_reason):
     """Reject truncated answers and invented or stale evidence references."""
-    import re
     if finish_reason not in (None, 'stop'):
         raise ValueError('incomplete model response')
-    sources={item['evidence_id'] for item in evidence['source_analyses'] if 'periods' in item}
-    known=sources | {c['evidence_id'] for c in evidence.get('components',[])}
-    if evidence.get('totals'): known.add('total')
-    cited=set(re.findall(r'\[((?:source-|component-)[^\]\s]+|total)\]',content))
-    if not cited.intersection(sources) or cited-known:
-        raise ValueError('missing or invalid evidence citation')
+    from bi_check_agent.answer_validation import validate_claims
+    validate_claims(content,evidence)
+
+
+DIAGNOSTIC_TOOL={'type':'function','function':{'name':'review_diagnostic_evidence',
+    'description':'Read the shared verification results for this exact query scope. Returns verified facts, assessment, pending cause and missing evidence; no new data lookup or arbitrary SQL.',
+    'parameters':{'type':'object','properties':{},'additionalProperties':False}}}
+
+
+def diagnostic_evidence(snapshot):
+    reports={period:diagnostics.public(snapshot.get(period+'_evidence',{}).get('diagnostics')) for period in source_frames(snapshot)}
+    return {'assessments':reports,'note':'只引用已核查事实。cause_status=pending/unresolved 时不能声称已确认任务失败或最终根因。'}
 
 
 def answer(snapshot, question, history=()):
@@ -148,12 +162,13 @@ def answer(snapshot, question, history=()):
     evidence['source_analyses']=[]
     answer_id=uuid4().hex[:12]
     evidence['answer_id']=answer_id
+    repair_attempts=0
     try:
         from openai import OpenAI
         client=OpenAI(api_key=api_key,timeout=60,max_retries=0)
         for turn in range(6):
             result=client.chat.completions.create(model=os.getenv('OPENAI_MODEL','gpt-5.4'),messages=messages,
-                tools=[TOOL],tool_choice='required' if turn==0 else ('none' if turn==5 else 'auto'),
+                tools=[TOOL] if turn==0 else [TOOL,DIAGNOSTIC_TOOL],tool_choice='required' if turn==0 else ('none' if turn==5 else 'auto'),
                 parallel_tool_calls=False,max_completion_tokens=3000,store=False)
             msg=result.choices[0].message
             calls=getattr(msg,'tool_calls',None) or []
@@ -162,14 +177,23 @@ def answer(snapshot, question, history=()):
                 if not content or not content.strip():raise ValueError('empty model response')
                 if not any('periods' in item for item in evidence['source_analyses']):
                     raise ValueError('no successful source analysis')
-                validate_answer(content,evidence,getattr(result.choices[0],'finish_reason',None))
+                try:
+                    validate_answer(content,evidence,getattr(result.choices[0],'finish_reason',None))
+                except ValueError:
+                    if repair_attempts or turn==5: raise
+                    repair_attempts+=1
+                    messages.extend([{'role':'assistant','content':content},{'role':'user','content':'回答未通过证据校验。请只复述本轮工具实际返回的数字，金额可保留两位小数；不要自行推导新数字。原因应标明待验证或无法判断，不得宣称任务失败或已确认最终根因。请保留有效证据引用并修正回答。'}])
+                    continue
                 break
             if len(calls)>4:raise ValueError('too many analysis operations')
             messages.append({'role':'assistant','content':msg.content,'tool_calls':[{'id':c.id,'type':'function','function':{'name':c.function.name,'arguments':c.function.arguments}} for c in calls]})
             for call in calls:
                 try:
-                    if call.function.name!='analyze_filtered_source_data':raise ValueError('不支持的工具。')
-                    data=analyze(snapshot,json.loads(call.function.arguments))
+                    if call.function.name=='analyze_filtered_source_data':
+                        data=analyze(snapshot,json.loads(call.function.arguments))
+                    elif call.function.name=='review_diagnostic_evidence' and json.loads(call.function.arguments)=={}:
+                        data=diagnostic_evidence(snapshot)
+                    else:raise ValueError('不支持的工具。')
                 except (ValueError,TypeError,KeyError):
                     data={'error':'分析参数无效；请核对字段白名单、统计口径和参数类型后重试。'}
                 data['evidence_id']=f'source-{answer_id}-{len(evidence["source_analyses"])+1}'

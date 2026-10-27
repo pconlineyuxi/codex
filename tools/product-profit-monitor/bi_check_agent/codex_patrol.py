@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 from dotenv import load_dotenv
 from bi_check_agent import core, service, lifecycle_patrol
+from bi_check_agent.diagnostics import public as public_diagnostics
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent.rule_catalog import rules_with_tag
 
@@ -95,6 +96,8 @@ def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None):
             'unknown_inputs':[v for v in evidence.get('unknown_rule_inputs',[]) if v['rule']==rule]})
     empty = not evidence['row_count']
     unknown = bool(evidence.get('unknown_rule_inputs'))
+    shared_diagnostics=evidence.get('diagnostics') or {}
+    unknown |= shared_diagnostics.get('source_status')=='failed' or bool(shared_diagnostics.get('summary',{}).get('unknown'))
     has_observations = any(r['hit_count'] and not r['pending_reason'] for r in rule_summary)
     lifecycle = None
     if run_lifecycle:
@@ -118,6 +121,7 @@ def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None):
         'finding_groups':findings, 'finding_group_count':len(findings),
         'advertising_observation':advertising_observation(result['rows'], findings),
         'lifecycle_review':lifecycle,
+        'diagnostics':public_diagnostics(evidence.get('diagnostics')),
         'evidence':evidence, 'limitations':([LIMITATION, MATURITY_NOTE] if mode=='review' else ([MATURITY_NOTE] if mode=='verified' else ['演示合成样本，不代表公司实际数据。'])),
         'interpretation':'这里统计规则条件命中，不是已确认异常。不同规则可能命中同一记录，命中数不能相加当作订单数；来源记录与广告分组不可混加。'}
 
@@ -146,6 +150,8 @@ def meaningful_signature(report):
         'rule_version':report.get('evidence',{}).get('rule_version'), 'scope':report.get('scope')}
     if report.get('lifecycle_review'):
         payload['lifecycle_review'] = lifecycle_patrol.signature_payload(report['lifecycle_review'])
+    if report.get('diagnostics'):
+        payload['diagnostics']=[{k:v for k,v in item.items() if k in {'market_place','store','sku','rule','assessment','reason_code','count'}} for item in report['diagnostics']['assessments'] if item['assessment'] not in {'waiting_data','unknown'} and item['reason_code']!='synthetic_demo']
     return sha256(json.dumps(payload,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
 
 
@@ -174,6 +180,13 @@ def markdown_report(report):
         return '\n'.join(lines+['',report['error']['message'],''])
     if report.get('lifecycle_review'):
         lines += lifecycle_patrol.markdown(report['lifecycle_review'])
+    if report.get('diagnostics'):
+        lines += ['', '## 与工具共用的适用条件及原因核查', '',
+            '| 平台 | 店铺 | SKU | 规则 | 判定 | 核查结论 | 尚缺证据 |',
+            '| --- | --- | --- | --- | --- | --- | --- |']
+        for item in report['diagnostics']['assessments'][:30]:
+            lines.append('| '+' | '.join(cell(v) for v in [item['market_place'],item['store'],item['sku'],service.RULE_LABELS[item['rule']],item['assessment_label'],item['conclusion'],'；'.join(item['missing_evidence'])])+' |')
+        if report['diagnostics'].get('source_error'):lines += ['',report['diagnostics']['source_error']]
     lines += ['', '## 按订单/广告日期保留的辅助观察', '',
         f"检查 {report['source_record_count']} 条来源记录，执行 {len(report['rules'])} 条规则；覆盖全部平台、店铺。",'',
         '固定排除四类费用/折扣 main_ir 及 NULL main_ir。', '', report['interpretation'],'',

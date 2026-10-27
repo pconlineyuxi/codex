@@ -1,12 +1,28 @@
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
+from contextvars import ContextVar
 from typing import Any
 
 import pandas as pd
 from dotenv import load_dotenv
 
 load_dotenv()
+_query_timezone=ContextVar('profit_query_timezone',default='America/New_York')
+
+
+@contextmanager
+def source_timezone():
+    """Odoo's live view casts naive UTC through the session timezone.
+
+    Evaluate that source in UTC, matching its materialization semantics; its
+    explicit US/Eastern expression still returns New York business timestamps.
+    The exact materialized timestamp must also match before any verification.
+    """
+    token=_query_timezone.set('UTC')
+    try:yield
+    finally:_query_timezone.reset(token)
 
 
 def get_engine():
@@ -27,7 +43,7 @@ def run_query(sql: str, params: dict[str, Any]) -> pd.DataFrame:
             with conn.begin():
                 conn.execute(text("SET TRANSACTION READ ONLY"))
                 conn.execute(text("SET LOCAL statement_timeout = '60s'"))
-                conn.execute(text("SET LOCAL TIME ZONE 'America/New_York'"))
+                conn.execute(text("SET LOCAL TIME ZONE 'UTC'" if _query_timezone.get()=='UTC' else "SET LOCAL TIME ZONE 'America/New_York'"))
                 return pd.read_sql(text(sql), conn, params=params)
     except Exception:
         raise RuntimeError("数据库查询未完成，请检查连接、只读权限、字段和查询时限。") from None

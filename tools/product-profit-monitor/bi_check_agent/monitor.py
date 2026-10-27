@@ -47,6 +47,7 @@ class MonitorStore:
             CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY, status TEXT, body TEXT, updated REAL);
             CREATE TABLE IF NOT EXISTS failures(scope TEXT PRIMARY KEY, active INTEGER, sequence INTEGER);
             CREATE TABLE IF NOT EXISTS scope_aliases(policy_scope TEXT PRIMARY KEY, stored_scope TEXT NOT NULL UNIQUE);
+            CREATE TABLE IF NOT EXISTS diagnostic_reviews(id INTEGER PRIMARY KEY AUTOINCREMENT, analysis_id TEXT, evidence_id TEXT, mode TEXT, label TEXT, note TEXT, policy_version TEXT, checked REAL, UNIQUE(analysis_id,evidence_id,mode));
             ''')
 
     @contextmanager
@@ -78,6 +79,19 @@ class MonitorStore:
     def plans(self):
         with self._db() as db:
             return [json.loads(r['body']) for r in db.execute('SELECT body FROM plans ORDER BY id')]
+
+    def save_review(self,analysis_id,evidence_id,mode,label,note):
+        if not analysis_id or not evidence_id or mode not in {'demo','live','live_test'}:
+            raise ValueError('核实记录范围无效')
+        if label not in {'confirmed_error','normal','waiting_data','unknown'} or not note.strip() or len(note)>4000:
+            raise ValueError('请选择核实结果并填写依据（最多4000字）')
+        with self._db() as db:
+            db.execute('INSERT INTO diagnostic_reviews(analysis_id,evidence_id,mode,label,note,policy_version,checked) VALUES(?,?,?,?,?,?,?) ON CONFLICT(analysis_id,evidence_id,mode) DO UPDATE SET label=excluded.label,note=excluded.note,policy_version=excluded.policy_version,checked=excluded.checked',
+                       (analysis_id,evidence_id,mode,label,note.strip(),diagnostic_policy_version(),time.time()))
+
+    def reviews(self,mode):
+        with self._db() as db:
+            return [dict(row) for row in db.execute('SELECT analysis_id,evidence_id,label,note,policy_version,checked FROM diagnostic_reviews WHERE mode=? ORDER BY checked DESC',(mode,))]
 
     def runs(self):
         with self._db() as db:
@@ -237,6 +251,13 @@ class MonitorStore:
                     if row['id'] in active_ids:
                         continue
                     item = json.loads(row['body'])
+                    if result['evidence'].get('recovery_policy') == 'object_present':
+                        obj=item.get('evidence',{}).get('object_key')
+                        if not obj or obj not in result['evidence'].get('coverage_keys',[]) or obj in result['evidence'].get('unresolved_keys',[]):
+                            item['verification_status']='not_verified'
+                            item['verification_note']='本次对象未覆盖或条件尚未核实，保留待核查状态。'
+                            db.execute('UPDATE incidents SET body=? WHERE id=?',(_json(item),row['id']))
+                            continue
                     item.update(status='recovered', last_seen=now, run_id=run_id, rule_source_version=source_version, policy_version=policy_version, evidence={**item['evidence'], 'run_id': run_id})
                     record = {'type': 'recovered', 'run_id': run_id, 'incident_id': row['id'], 'at': now, 'window_start': window_start, 'window_end': window_end}
                     events.append(record)

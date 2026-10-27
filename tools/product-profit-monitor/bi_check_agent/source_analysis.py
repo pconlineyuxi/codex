@@ -124,9 +124,15 @@ def grouped_statistics(selected, request):
         for measure in request.measures:
             row[measure.field+'__'+measure.statistic]=statistic(group[measure.field],measure.statistic)
             row[measure.field+'__missing_count']=int(group[measure.field].isna().sum())
+        # Derived metrics are computed here, not invented in the model's prose.
+        for name,numerator,denominator in [('ad_sales_ratio','ad_spend','sales'),('shipping_sales_ratio','shipping_fee','sales'),('weighted_unit_cost','order_cost_total','units'),('net_sales_per_unit','sales','units')]:
+            a,b=row.get(numerator+'__sum'),row.get(denominator+'__sum')
+            if a is not None and b is not None:
+                row[name]=None if b==0 else a/b
         records.append(row)
     cols=request.group_by+['source_record_count']+[m.field+'__'+m.statistic for m in request.measures]+[m.field+'__missing_count' for m in request.measures]
-    return pd.DataFrame(records,columns=list(dict.fromkeys(cols)))
+    extra=[key for row in records for key in row if key not in cols]
+    return pd.DataFrame(records,columns=list(dict.fromkeys(cols+extra)))
 
 
 def analyze(snapshot, arguments):

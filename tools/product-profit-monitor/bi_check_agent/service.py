@@ -141,6 +141,8 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
     if not rows.empty:
         rows=core._ensure_numeric(core._prepare_date_dimensions(rows))
     anomalies=core.detect_anomalies(rows,req.anomaly_rules)
+    from bi_check_agent import diagnostics
+    assessment=diagnostics.build(rows,anomalies,req,mode,db.run_query)
     evidence={'mode':mode,'complete':mode!='live_test','query_complete':True,'start':str(req.start_date),'end':str(req.end_date),
               'row_count':len(rows),'source':'synthetic_demo' if mode=='demo' else 'bi.ba_mv_profit_order_line_and_ad_info',
               'snapshot': before,'checked_at':datetime.now(timezone.utc).isoformat(),
@@ -149,7 +151,8 @@ def query(req: AnomalyQueryRequest, mode='demo', progress=None):
               'testing_note':'真实测试未核实刷新完整性、币种及源日期时区，不能作为正式巡查或恢复证据。' if mode=='live_test' else None,
               'rule_version':rule_source_version(),'policy_version':diagnostic_policy_version(),
               'applied_filters':applied,'unrestricted_filters':skipped,
-              'query':req.model_dump(mode='json'),'unknown_rule_inputs':rule_unknowns(rows,req.anomaly_rules),'localization_limit':'已定位到 Product Profit 结果视图，尚未接入上游源表验证。'}
+              'query':req.model_dump(mode='json'),'unknown_rule_inputs':rule_unknowns(rows,req.anomaly_rules),
+              'localization_limit':'已按统一逻辑核对可用来源；具体证据与未验证原因见 diagnostics。','diagnostics':assessment}
     return QueryResult(rows=rows, aggregate=core.aggregate_product(rows,req.aggregation_dimensions),
                        anomalies=anomalies, evidence=QueryEvidence(**evidence)).as_dict()
 
@@ -167,6 +170,9 @@ def evaluate_plan(plan,start,end):
     if result['evidence']['unknown_rule_inputs']:
         raise RuntimeError('规则所需字段存在缺失或不可解析值，本次无法完整判断，原异常不标记恢复。')
     findings={}
+    from bi_check_agent import diagnostics
+    assessments=result['evidence'].get('diagnostics') or {}
+    by_object={(obj,item['rule']):item for item in assessments.get('assessments',[]) for obj in item['object_keys']}
     thresholds=core.load_yaml('diagnostic_rules.yaml').get('thresholds',{})
     worsening=plan.get('worsening_deltas',{})
     if not isinstance(worsening,dict) or set(worsening)-set(RULE_LABELS):
@@ -174,8 +180,14 @@ def evaluate_plan(plan,start,end):
     for delta in worsening.values():
         if not isinstance(delta,(int,float)) or not __import__('math').isfinite(delta) or delta <= 0:
             raise ValueError('恶化增量必须为有限正数')
-    for row in records(result['anomalies']):
+    for original,row in zip(result['anomalies'].to_dict('records'),records(result['anomalies'])):
         for rule in row['anomaly_rules'].split(', '):
+            # JSON export rounds timestamps to milliseconds; match using the
+            # original database precision, as the shared assessments do.
+            obj=diagnostics.key_for(original)
+            assessed=by_object.get((obj,rule))
+            if assessed and assessed['assessment'] in {'unknown','waiting_data'}:
+                continue
             fields={k:row.get(k) for k in ['order_id','sku','ir','market_place','store','day','date_order']}
             key=sha256(json.dumps([rule,fields],sort_keys=True).encode()).hexdigest()
             sales=row.get('sales')
@@ -193,6 +205,7 @@ def evaluate_plan(plan,start,end):
                'object':' / '.join(str(fields[k]) for k in ['market_place','store','sku','order_id'] if fields.get(k)),
                'value':0,'evidence':{'classification':'疑似数据错误' if rule in rules_with_tag('monitor_data_issue') else '待核查 / 经营信号',
                  'samples':[], 'localization_limit':result['evidence']['localization_limit'],
+                 'object_key':obj,'assessment':({k:v for k,v in assessed.items() if k!='object_keys'} if assessed else None),
                  'metric':metric,'threshold':threshold,'affected_sales':0.,'affected_sales_missing':False,
                  'affected_sales_note':'受影响销售额不是损失；跨规则不可直接求和。',
                  'source_record_count':0,'query_evidence':result['evidence'],
@@ -205,7 +218,13 @@ def evaluate_plan(plan,start,end):
             item['evidence']['actual_value']=item['value']
             if rule in worsening:item['worsening_delta']=float(worsening[rule])
             if len(item['evidence']['samples'])<5:item['evidence']['samples'].append(row)
-    return {'findings':list(findings.values()),'evidence':result['evidence']}
+    # An object leaving the result is not evidence that its values recovered.
+    covered={diagnostics.key_for(r) for r in result['rows'].to_dict('records')}
+    if not result['rows'].empty:
+        covered.update(diagnostics.key_for(r) for r in core.aggregate_product(result['rows'],['marketplace','store','sku','day']).to_dict('records'))
+    return {'findings':list(findings.values()),'evidence':{**result['evidence'],
+            'recovery_policy':'object_present','coverage_keys':sorted(covered),
+            'unresolved_keys':assessments.get('unresolved_keys',[])}}
 
 
 def amount_change_percent(previous, current):

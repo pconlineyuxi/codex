@@ -42,6 +42,7 @@ class QueryEvidence(Contract):
     query: dict[str, Any]
     unknown_rule_inputs: list[dict[str, Any]]
     localization_limit: str
+    diagnostics: dict[str, Any] | None = None
 
     @model_validator(mode='after')
     def consistent_scope(self):

@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import yaml
 
-POLICY_REVISION = 1
+POLICY_REVISION = 2
 # Verified equivalent builds, newest first. e903... differs only in display
 # grouping of aggregate findings (service.summarize_findings), not evaluation.
 # Older config-only fingerprints cannot prove SQL/formula identity and remain
