@@ -14,7 +14,7 @@ COST_RULES = list(rules_with_tag('lifecycle_cost'))
 NOTE = ('按预期补齐时限复核，不代表补跑任务已成功。销售额按创建当日应补齐；成本按出库后次日纽约时间 09:00 复核。'
         'scan_time 的 UTC 口径已由用户确认；sale_order.create_date 按 UTC 解释，与本次时间核查一致，仍属待业务确认的假设。'
         '金额来自物化结果视图的直接订单来源 bi.ba_profit_order_line_info，以订单行 ID 关联；与辅助观察不是同一快照。'
-        '多订单行对应同一出库商品或来源不唯一时不强行分配。仅覆盖指定创建日/出库日，未自动回查更早未解决的批次。')
+        '多订单行对应同一出库商品或来源不唯一时不强行分配。本节覆盖指定创建日/出库日；历史疑点复查另列，不将历史未命中解释为正式恢复。')
 
 
 def utc_bounds(day):
@@ -34,22 +34,32 @@ def _bounded(sql, params, query_fn):
     return result
 
 
-def fetch_cohorts(day, query_fn=None):
+def fetch_cohorts(day, query_fn=None, targets=None):
     query_fn = query_fn or db.run_query
     start, end = utc_bounds(day)
     params = {'start':start, 'end':end}
+    sales_filter = cost_filter = ''
+    if targets is not None:
+        sales_ids = sorted({int(t['order_line_id']) for t in targets if t['cohort']=='sales' and t.get('order_line_id') is not None})
+        pairs = sorted({(int(t['order_id']),int(t['product_id'])) for t in targets if t['cohort']=='cost' and t.get('order_id') is not None})
+        for i, value in enumerate(sales_ids): params[f'sales_{i}'] = value
+        sales_filter = ' AND sl.id IN ('+','.join(f':sales_{i}' for i in range(len(sales_ids)))+')' if sales_ids else ' AND FALSE'
+        for i, (order, product) in enumerate(pairs):
+            params[f'order_{i}'], params[f'product_{i}'] = order, product
+        cost_filter = ' AND ('+' OR '.join(f'(order_id=:order_{i} AND product_id=:product_{i})' for i in range(len(pairs)))+')' if pairs else ' AND FALSE'
     sales = _bounded("""
 SELECT sl.id AS order_line_id, so.create_date AS created_at
 FROM public.sale_order so
 JOIN public.sale_order_line sl ON sl.order_id=so.id
 WHERE so.create_date >= :start AND so.create_date < :end
   AND so.state='sale' AND (so.walmart_status <> 'cancelled' OR so.walmart_status IS NULL)
-""", params, query_fn)
+"""+sales_filter, params, query_fn)
     cost = _bounded("""
 WITH events AS (
     SELECT order_id, product_id, MAX(scan_time) AS last_scan_at
     FROM public.order_outbound_history
     WHERE scan_time >= :start AND scan_time < :end AND scan_qty > 0
+"""+cost_filter+"""
     GROUP BY order_id, product_id
 )
 SELECT e.order_id, e.product_id, e.last_scan_at, so.create_date AS created_at,
@@ -115,7 +125,7 @@ def _evaluate(ids, source, rules, day, due):
         'groups':groups, 'unknown_inputs':service.rule_unknowns(rows,rules)}
 
 
-def review(day, selected_rules, now=None, fetch_fn=None):
+def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
     current = now or datetime.now(timezone.utc)
     if current.tzinfo is None:
         raise ValueError('检查时间必须带时区')
@@ -135,6 +145,9 @@ def review(day, selected_rules, now=None, fetch_fn=None):
         'unmatched_order_products':int((cost.line_matches==0).sum()) if not cost.empty else 0,
         'ambiguous_order_products':int((cost.line_matches>1).sum()) if not cost.empty else 0,
         'created_before_outbound_day':int((pd.to_datetime(unique_cost.created_at)<utc_bounds(day)[0]).sum()) if not unique_cost.empty else 0})
+    if tracking_sink is not None:
+        from bi_check_agent.patrol_tracking import collect_snapshot
+        tracking_sink(collect_snapshot(day, current, sales, cost, source, sales_rules, cost_rules))
     partial = any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
     status = 'empty_unverified' if sales.empty and cost.empty else ('partial_assessment' if partial else 'reviewed')
     return {'status':status, 'job_completion_verified':False,

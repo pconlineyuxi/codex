@@ -217,7 +217,7 @@ def _business_guard_notes(row: pd.Series, rule: str, cfg: dict[str, Any]) -> lis
     return notes
 
 
-def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None) -> pd.DataFrame:
+def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None, *, preserve_line_id: bool = False) -> pd.DataFrame:
     cfg = load_yaml("diagnostic_rules.yaml")
     thresholds = cfg.get("thresholds", {})
     if df.empty or not selected_rules:
@@ -280,6 +280,9 @@ def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None) 
     if result.empty:
         return result
     preferred = ORDER_LINE_DETAIL_COLUMNS + ["day", "month", "Sales", "Units", "Ads cost", "Tacos", "Shipping Fee", "Profit with Ads & Ship", "Profit rate with Ads & Ship", "anomaly_rules", "business_guard_notes"]
+    if preserve_line_id:
+        # Internal history reconciliation only; public callers keep the old projection.
+        preferred = preferred + ['order_line_id']
     return result[[c for c in preferred if c in result.columns]]
 
 

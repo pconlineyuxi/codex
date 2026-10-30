@@ -9,12 +9,13 @@ import json
 import os
 from pathlib import Path
 import tempfile
+import sys
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dotenv import load_dotenv
-from bi_check_agent import core, service, lifecycle_patrol
+from bi_check_agent import core, service, lifecycle_patrol, patrol_tracking
 from bi_check_agent.diagnostics import public as public_diagnostics
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent.rule_catalog import rules_with_tag
@@ -70,7 +71,7 @@ def previous_day(now=None):
     return current.astimezone(ZONE).date() - timedelta(days=1)
 
 
-def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None):
+def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None, tracking_sink=None):
     if mode not in {'review', 'verified', 'demo'}:
         raise ValueError('未知巡查模式')
     request = AnomalyQueryRequest(start_date=day, end_date=day+timedelta(days=1),
@@ -102,7 +103,7 @@ def build_report(day, rules, mode='review', query_fn=None, lifecycle_fn=None):
     lifecycle = None
     if run_lifecycle:
         try:
-            lifecycle = (lifecycle_fn or lifecycle_patrol.review)(day, rules)
+            lifecycle = lifecycle_fn(day,rules) if lifecycle_fn else lifecycle_patrol.review(day,rules,tracking_sink=tracking_sink)
         except Exception:
             lifecycle = {'status':'failed','job_completion_verified':False,
                 'note':'创建/出库时间复核未完成，请核查只读来源、关联字段与读取上限；未输出原始连接错误。'}
@@ -176,6 +177,12 @@ def markdown_report(report):
         f"业务日期：{w['start']}；截至 {w['end_exclusive']} 00:00（不含），纽约时间。", '',
         f"执行状态：{report['status']}；数据模式：{report['mode']}。", '']
     lines.extend(report.get('limitations',[]))
+    if report.get('history_review'):
+        history=report['history_review']
+        if history.get('error'):
+            lines += ['', '历史复查未完成：'+history['error']]
+        else:
+            lines += patrol_tracking.markdown(history,report['notification'])
     if not report['query_succeeded']:
         return '\n'.join(lines+['',report['error']['message'],''])
     if report.get('lifecycle_review'):
@@ -246,14 +253,44 @@ def main(argv=None):
     p.add_argument('--mode',choices=['review','verified','demo'],default='review')
     p.add_argument('--rules',choices=['all','core'],default='all')
     p.add_argument('--output-dir',type=Path,default=ROOT/'.runtime/codex-patrol')
+    p.add_argument('--history-days',type=int,default=14,help='Historical report lookback; unresolved items remain tracked beyond this window')
     args=p.parse_args(argv)
     day=args.date or previous_day()
     if day >= datetime.now(ZONE).date(): p.error('日常巡查只检查已经结束的业务日')
+    if not 1 <= args.history_days <= 14: p.error('历史报告回看范围为 1 至 14 天；已入库未解决项不受此窗口截断')
     rules=list(service.RULE_LABELS) if args.rules=='all' else CORE_RULES
-    try: report=build_report(day,rules,args.mode)
-    except Exception as exc: report=failed_report(day,args.mode,exc)
-    report=persist(report,args.output_dir)
-    print(json.dumps({k:report[k] for k in ['status','query_succeeded','window','changed_since_previous_run','artifacts']},ensure_ascii=False))
+    if args.mode=='demo':
+        try: report=build_report(day,rules,args.mode)
+        except Exception as exc: report=failed_report(day,args.mode,exc)
+        report=persist(report,args.output_dir)
+    else:
+        mode_dir=args.output_dir/args.mode
+        try:
+            with patrol_tracking.locked(mode_dir):
+                snapshots=[]
+                try: report=build_report(day,rules,args.mode,tracking_sink=snapshots.append)
+                except Exception as exc: report=failed_report(day,args.mode,exc)
+                state=None
+                try:
+                    state=patrol_tracking.load_state(mode_dir)
+                    patrol_tracking.review_history(report,state,mode_dir,snapshots,datetime.now(timezone.utc),args.history_days,
+                        progress=lambda day,status:print(json.dumps({'history_event_day':day,'phase':status}),file=sys.stderr,flush=True))
+                except Exception:
+                    state=None
+                    report['history_review']={'status':'failed','error':'历史状态或报告不可读，原跟踪文件保留；本次不关闭任何历史疑点。'}
+                    report['notification']={'should_notify':True,'items':[],'health_changes':{'history':'failed'}}
+                    if report['query_succeeded']: report['status']='partial_assessment'
+                report=persist(report,args.output_dir)
+                if state is not None:
+                    atomic_json(mode_dir/'tracking-state.json',state)
+                    (mode_dir/'tracking-state.json').chmod(0o600)
+        except RuntimeError as exc:
+            # Includes lock contention: never race another patrol's writes.
+            print(json.dumps({'status':'failed','query_succeeded':False,'error':'巡查运行冲突或本地归档未完成；未覆盖历史跟踪状态。'},ensure_ascii=False))
+            return 1
+    fields=['status','query_succeeded','window','changed_since_previous_run','artifacts']
+    if 'notification' in report: fields.append('notification')
+    print(json.dumps({k:report[k] for k in fields},ensure_ascii=False))
     return 0 if report['query_succeeded'] else 1
 
 
