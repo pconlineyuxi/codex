@@ -132,7 +132,10 @@ def test_pre_refactor_demo_sql_frames_findings_and_profit_are_unchanged(monkeypa
     result = service.query(req)
     assert {key: service.records(result[key]) for key in ('rows', 'aggregate', 'anomalies')} == baseline['frames']
     assert list(core.build_order_line_sql(req)) == baseline['sql']
-    assert service.RULE_LABELS == baseline['labels']
+    # Approved terminology clarification; the original data/SQL fixture stays intact.
+    assert service.RULE_LABELS == {**baseline['labels'],
+        'missing_product_cost':'基础产品成本为空或非正数',
+        'unit_cost_non_positive':'产品与硬件单件成本非正数'}
     assert result['evidence']['unknown_rule_inputs'] == baseline['unknowns']
     current = request(sku=['DEMO-HEALTHY'], anomaly_rules=req.anomaly_rules,
                       aggregation_dimensions=req.aggregation_dimensions)

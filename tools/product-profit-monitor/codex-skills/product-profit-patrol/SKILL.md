@@ -1,39 +1,43 @@
 ---
 name: product-profit-patrol
-description: 在 Codex 中执行 Product Profit 每日只读核查，复用现有 17 条规则，区分订单数据尚待补齐的观察项与经营信号，生成平台、店铺、SKU 维度摘要和证据。用于日常巡查或指定业务日复查。
+description: 在 Codex 中调用 Product Profit 只读巡检工具，依据统一规则和通知结果解读每日与历史疑点；Skill 不另行维护或推断业务规则。
 ---
 
-# Product Profit 每日核查
+# Product Profit 每日巡检执行 Skill
 
-面向 BA，复用本地工具的查询和规则引擎，无需启动 Streamlit 或 worker。用户确认的日常范围是纽约时间前一个完整业务日、全部平台和店铺、全部 17 条规则；保留四类费用和折扣 main_ir 的固定排除及 NULL 排除口径。
+## 职责与唯一规则来源
+
+本 Skill 是执行和解读流程；巡检工具负责数据库查询、规则判断、适用性判断、历史跟踪、提醒去重与报告归档；Codex 定时任务仅负责触发。
+
+项目目录：`/Users/yuxi/Documents/codex project/product-profit-monitor/tools/product-profit-monitor`。
+
+每次先读取项目 `docs/patrol-rules.md`。它由 `config/diagnostic_rules.yaml` 生成；规则公式在 `core.py`，业务适用性在 `patrol_policy.py`，状态和提醒在 `patrol_tracking.py`。查看当前配置可执行 `.venv/bin/python -m bi_check_agent.codex_patrol --list-rules`，此命令不连接数据库。不要在 Skill、定时提示或回答中建立第二套阈值，也不能自行把“没有内部扫描”解释成已取消。
 
 ## 执行
 
-项目目录为 `/Users/yuxi/Documents/codex project/product-profit-monitor/tools/product-profit-monitor`。从该目录执行：
+从项目目录执行：
 
 ```sh
 .venv/bin/python -m bi_check_agent.codex_patrol --mode review --rules all
 ```
 
-默认日期在每次执行时按 America/New_York 计算；用户指定历史日期时使用 `--date YYYY-MM-DD`。真实凭证由项目 `.env` 加载，不读取或展示密钥。执行与结果保存在本机，不使用演示数据代替失败的真实查询。
+日期由模块按 America/New_York 计算前一个完整自然日；用户指定历史日期时加 `--date YYYY-MM-DD`。凭证由本地配置加载，不读取或输出凭证。真实查询失败不能用演示数据替代。不启动网页或 worker。
 
-模块输出 JSON，包含执行状态、`notification` 和报告绝对路径。先读 `notification.should_notify`、`notification.items` 和 `health_changes`，再读取 `artifacts.markdown`；需要完整分组时读取 `artifacts.json` 的指定字段，不打印整份 evidence。报告默认在 `.runtime/codex-patrol/review/`，每次独立归档。`latest.json` 是最新尝试，`last-successful.json` 是最近一次主查询成功；后者不表示所有规则可判断或数据已验证通过。
+每次自动归档。读取终端输出的报告路径，先读取 `notification.should_notify`、`notification.items`、`notification.health_changes`，再读 `history_review`、`lifecycle_review` 和 Markdown；仅按需读取 JSON 指定字段，避免整份 evidence 或私有跟踪文件输出。`latest.json` 是最近尝试，`last-successful.json` 仅表示最近主查询成功。
 
-默认回看最近 14 个业务日期已有报告中的生命周期疑点，并每日复查仍未解决的条目。`history_review` 记录覆盖日期、无法读取或缺少的历史报告、复查失败和当前待跟踪事项。未解决条目超过两周继续保留；已不再命中的条目在两周窗口内继续复查，以识别再次命中。缺少历史报告的日期不能声称已完成检查。`tracking-state.json` 是仅本地使用的私有跟踪文件，不展示其中的订单标识，不删除或重置它以规避问题。
+## 反馈
 
-2026-10-30 用户确认的提醒节奏：已出库且命中单件总成本非正数、拆件成本超过整机与改装成本的疑点为高优先级，未解决时每天提醒；其他销售／成本疑点和关联缺口首次发现时提醒，持续 3 天后提醒，之后每 3 天提醒。状态变化及时提醒。频率按纽约自然日计算，重复运行不重复生成同日持续提醒。高优先级问题暂时无法复查时仍保持优先级；只有缺失输入而未实际命中严重规则的项目不自动升级。
+- 为 true 时反馈本次新增、状态变化、到期提醒和检查健康变化；为 false 且无新的可行动事项时保持安静。不因原始规则计数、广告或符号观察变化重复提醒。
+- 按平台／店铺／SKU 组织，**尽量给出 `order_numbers` 业务订单号**，同时说明规则、状态、优先级、持续天数和 BA 需核对的事实。多规则对应同一订单时合并说明，不相加为独立订单数。缺少订单号如实写未取得，不猜测。
+- `order_reference_basis=exact` 是稳定订单行对应的业务订单号；`current_group` 只代表本次在旧日期／分组中查到的订单；`last_known` 是上次已知、本次未核实。保留这些区别。
+- `exempt` 是业务不适用，不是已修复；`deferred` 是长期未履约待核对，不是已取消；`clear` 是本次不再命中，不是正式恢复；`unknown` 是证据不足。以工具输出为准，不能只看金额、年龄或是否有 PO 自行改判。
+- 工具按统一规则执行已确认零成本例外、取消判定和长期未履约判定。没有 PO 不自动豁免所有商品。成本为空、为零、为负应分别解释。只有内部没有扫描而已有交付数量或平台履约证据时，不能断言无需交付。
+- 历史已记录疑点与当天创建／出库批次分别说明。缺少历史报告、复查失败、来源缺失／重复、多行匹配和固定筛选变化保留覆盖或关联缺口。原分组复查不能冒充已恢复旧订单身份。
+- 必须检查顶层状态、`lifecycle_review.status` 和 `history_review.status`；主查询失败时仍检查历史复查结果。缺少 notification 或历史复查失败时报告缺口，不假定没有历史问题。
+- 预期补齐时限不等于任务成功证据。直接来源和物化结果不一定是同一快照，不用计数差推算恢复。保留刷新完整性、源币种、源日期解释及规则适用限制。空数据不等于通过。
+- 广告只按 `advertising_observation` 解释平台数、店铺数、SKU／日分组数与同日订单匹配；同日账面销售不是广告归因销售。
+- 附当次报告链接。仅输出业务订单号及核查必要字段，不输出数据库主键、订单行明细、客户或地址信息。私有 `tracking-state.json` 不展示、不删除、不重置。
 
-## 判断与反馈
+## 操作边界
 
-- `review` 为日常只读核查，刷新完整性、源币种及源日期时区尚未确认。明确保留这一限制，不将结果表述为正式数据质量通过或异常已恢复。
-- 已确认业务时序：sale_order.create_date 当天创建的订单正常应在当天补充销售额；实际出库订单在当晚至次日凌晨写入成本。出库依据为 order_outbound_history.scan_time，用户已确认是 UTC。创建时间也按 UTC 转纽约日期，目前有实时数据支持这一解释，但尚未单独获得用户确认，报告保留假设。has_product_cost / has_sale_price 只是金额大于零的派生标记，不能作为批次完成凭据。
-- 优先读取 `lifecycle_review`：销售检查指定日期创建的有效订单；成本检查指定日期有正数扫描出库且订单+商品能唯一匹配到订单行的记录，包含更早创建但本日出库的订单。销售按创建当日应补齐，成本在次日 09:00 复核。金额读取物化结果视图的直接订单来源 bi.ba_profit_order_line_info，按订单行 ID 关联；与原辅助观察不是同一快照，数量变化不能解释成原异常已恢复。相同订单+商品匹配多行、无匹配行、来源重复、缺失输入均单独标注，不按整单强行分配成本。只输出平台/店铺/SKU 汇总，不提供订单行明细。
-- `lifecycle_review.basis=expected_deadline` 只是预期补齐时限，`job_completion_verified=false`，命中只能称为“超过预期时点仍命中的疑点”，不能确认写入失败。`lifecycle_review` 是指定创建日/出库日复核；`history_review` 是历史已记录疑点复查，不等于全部历史订单扫描。新条目内部按稳定标识关联，旧报告只有维度汇总的条目标为 `identity_kind=legacy_group`，不能当作已恢复原订单身份。来源消失、筛选排除、缺失、重复、复查失败均不能关闭疑点。“本次已不再命中”不是正式恢复。两条成本规则的重叠计数读取 overlapping_cost_rule_lines，历史规则项也不能相加当独立订单。
-- 原订单日期观察中标为 `assessment=maturity_unverified` 的规则仍不单独用于提醒；创建/出库日复核中的疑点和关联缺口可反馈。不能先过滤掉所有无价格/无成本记录，再声称没有缺失。其余依赖广告到齐及完整成本的比率规则仍保留限制。
-- 区分疑似数据问题与经营信号／符号待核查。命中并不等于已确认错误，负促销等符号问题尤其不能直接判错。
-- `partial_assessment` 表示有规则依赖字段缺失、生命周期来源关联不明确或该复核失败；给出具体缺口。`maturity_unverified` 表示辅助观察无法核实应到时点；`observations` 表示另有可描述的信号，仍不是确认错误。`empty_unverified` 表示没有记录，不等于数据正常。`failed` 表示检查未完成，不以旧结果冒充本次结果。顶层 query_succeeded 只表示主查询成功，仍须检查 lifecycle_review.status。
-- 行级规则计数是来源记录，广告和利润率规则计数是 SKU/平台/店铺/日分组；跨规则可能重复，不把命中数相加当订单数。不提供订单行明细或未经币种统一的总损失估算。
-- 日常运行先给出业务日期、执行状态、主要变化和需要 BA 核查的对象，附本地报告链接。结合完整分组定位，不根据展示的前 30 组推断总体。
-- 广告观察优先读取 `advertising_observation`：分别说清平台数、店铺数、SKU/日分组数，以及“本次范围内无匹配订单”和“有订单但净销售为零”的分组数。不可把分组数说成平台数，不把同日账面销售为零等同于广告无转化或数据错误；广告归因数据、回补周期和判断窗口尚未确认。
-- 每次都保存报告。以 `notification.should_notify` 为日常提醒依据：反馈本次新增、状态变化、到期持续提醒以及检查失败／从失败恢复。已知问题未变化且未到提醒时间时保持安静，不重复罗列全部待跟踪项。`changed_since_previous_run` 仅为报告分布变化，不能单独触发提醒；尤其不因负促销、负佣金、广告或原始待到齐计数的日常变化刷屏。高优先级持续提醒必须明确其持续天数和待核查对象；普通问题按三天节奏。查询从失败变为成功不代表历史疑点正式恢复。若 notification 缺失或 history_review 失败，报告功能缺口，不假定没有历史问题。
-- 不自动发送飞书、不更改业务数据、不修改原工具计划和正式异常状态。数据库不可达或查询失败时报告问题；不改凭据、不扩大权限、不伪造就绪凭据。后续若用户批准正式模式，可使用 verified，但必须通过原有数据就绪检查。
+数据库只读；不修改业务数据、原网页工具计划或正式异常状态，不向飞书或其他人发送消息。网络沙箱受限时仅通过现有授权执行同一只读命令；仍失败则报告阻塞，不改凭据、不扩权限、不绕过权限。调整规则必须在项目统一配置／代码修改、验证并更新生成文档，不能只改 Skill 文案假装工具已生效。

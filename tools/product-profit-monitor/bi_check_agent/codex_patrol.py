@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 from dotenv import load_dotenv
-from bi_check_agent import core, service, lifecycle_patrol, patrol_tracking
+from bi_check_agent import core, service, lifecycle_patrol, patrol_tracking, patrol_policy
 from bi_check_agent.diagnostics import public as public_diagnostics
 from bi_check_agent.models import AnomalyQueryRequest
 from bi_check_agent.rule_catalog import rules_with_tag
@@ -252,12 +252,17 @@ def main(argv=None):
     p.add_argument('--date',type=date.fromisoformat,default=None,help='Business date, default yesterday in New York')
     p.add_argument('--mode',choices=['review','verified','demo'],default='review')
     p.add_argument('--rules',choices=['all','core'],default='all')
+    p.add_argument('--list-rules',action='store_true',help='Print the shared rulebook without querying the database')
     p.add_argument('--output-dir',type=Path,default=ROOT/'.runtime/codex-patrol')
-    p.add_argument('--history-days',type=int,default=14,help='Historical report lookback; unresolved items remain tracked beyond this window')
+    p.add_argument('--history-days',type=int,default=patrol_policy.POLICY['history_days'],help='Historical report lookback; unresolved items remain tracked beyond this window')
     args=p.parse_args(argv)
+    if args.list_rules:
+        from bi_check_agent.rulebook import render
+        print(render())
+        return 0
     day=args.date or previous_day()
     if day >= datetime.now(ZONE).date(): p.error('日常巡查只检查已经结束的业务日')
-    if not 1 <= args.history_days <= 14: p.error('历史报告回看范围为 1 至 14 天；已入库未解决项不受此窗口截断')
+    if not 1 <= args.history_days <= patrol_policy.POLICY['history_days']: p.error('历史报告回看范围超出配置；已入库未解决项不受此窗口截断')
     rules=list(service.RULE_LABELS) if args.rules=='all' else CORE_RULES
     if args.mode=='demo':
         try: report=build_report(day,rules,args.mode)

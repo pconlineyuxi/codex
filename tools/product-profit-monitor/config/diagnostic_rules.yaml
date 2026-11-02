@@ -13,6 +13,7 @@ thresholds:
   max_result_rows: 50000
 queryable_rules:
   zero_units_with_sales:
+    condition_zh: "数量 = 0 且净销售额 ≠ 0"
     severity: P0
     level: line
     description: Units = 0 but Sales is not 0.
@@ -34,6 +35,7 @@ queryable_rules:
     - lifecycle_sales
     - monitor_data_issue
   zero_sales_with_units:
+    condition_zh: "净销售额 = 0 且数量 ≠ 0；确认取消及长期未履约按适用性策略处理"
     severity: P0
     level: line
     description: Sales = 0 but Units is not 0.
@@ -53,6 +55,7 @@ queryable_rules:
     - awaits_sales
     - lifecycle_sales
   negative_units:
+    condition_zh: "数量 < 0"
     severity: P0
     level: line
     description: Units is negative.
@@ -67,6 +70,7 @@ queryable_rules:
     - units
     tags: []
   negative_sales:
+    condition_zh: "净销售额 < 0"
     severity: P0
     level: line
     description: Sales is negative.
@@ -83,6 +87,7 @@ queryable_rules:
     - awaits_sales
     - lifecycle_sales
   negative_shipping_fee:
+    condition_zh: "运费 < 0"
     severity: P1
     level: line
     description: Shipping fee is negative.
@@ -97,6 +102,7 @@ queryable_rules:
     - shipping_fee
     tags: []
   negative_promotion:
+    condition_zh: "原始促销金额 < 0；先核对符号口径"
     severity: P1
     level: line
     description: Raw promotion is negative; review the source sign convention, not an automatic error.
@@ -111,6 +117,7 @@ queryable_rules:
     - raw_promotion
     tags: []
   negative_commission:
+    condition_zh: "佣金 < 0"
     severity: P1
     level: line
     description: Commission is negative.
@@ -124,6 +131,7 @@ queryable_rules:
     - commission
     tags: []
   negative_ad_spend:
+    condition_zh: "SKU／平台／店铺／日的广告费合计 < 0"
     severity: P1
     level: aggregate
     description: Ad spend is negative.
@@ -138,13 +146,15 @@ queryable_rules:
     - ad_spend
     tags: []
   missing_product_cost:
+    condition_zh: "基础产品成本为空或 ≤ 0；已确认的零成本例外除外"
     severity: P0
     level: line
     description: Product cost per unit is null or non-positive while cost should exist.
-    label: 产品成本缺失或非正数
+    label: 基础产品成本为空或非正数
     label_en: Missing / non-positive product cost
     aliases:
     - missing product cost
+    - 产品成本缺失或非正数
     - 成本缺失
     - 没有成本
     - product cost missing
@@ -157,13 +167,15 @@ queryable_rules:
     - lifecycle_cost
     - monitor_data_issue
   unit_cost_non_positive:
+    condition_zh: "基础产品成本 + 装入硬件成本 − 拆下硬件成本 ≤ 0；输入必须齐全；已确认的零成本例外除外"
     severity: P0
     level: line
     description: product_cost_unit + hardware_cost - removed_hardware <= 0.
-    label: 单件总成本非正数
+    label: 产品与硬件单件成本非正数
     label_en: Unit cost <= 0
     aliases:
     - unit cost <= 0
+    - 单件总成本非正数
     - 单件成本小于等于0
     - 成本小于等于0
     - unit cost异常
@@ -177,6 +189,7 @@ queryable_rules:
     - lifecycle_cost
     - monitor_data_issue
   removed_hardware_abnormal:
+    condition_zh: "拆下硬件成本 > 基础产品成本 + 装入硬件成本"
     severity: P1
     level: line
     description: removed_hardware is greater than product_cost_unit + hardware_cost.
@@ -195,6 +208,7 @@ queryable_rules:
     - awaits_cost
     - lifecycle_cost
   shipping_cost_ratio_high:
+    condition_zh: "净销售额 > 0 且运费 / 净销售额 > {shipping_cost_ratio_high}"
     severity: P1
     level: line
     description: shipping_fee / sales exceeds configured threshold.
@@ -214,6 +228,7 @@ queryable_rules:
     - default_patrol
     - awaits_sales
   unit_shipping_fee_high:
+    condition_zh: "数量 > 0 且运费 / 数量 > {unit_shipping_fee_high}（源币种）"
     severity: P1
     level: line
     description: shipping_fee / units exceeds configured threshold.
@@ -229,6 +244,7 @@ queryable_rules:
     - shipping_fee
     tags: []
   promotion_ratio_high:
+    condition_zh: "净销售额 > 0 且促销成本 / 净销售额 > {promotion_ratio_high}；仅配置允许的 Amazon 平台"
     severity: P1
     level: line
     description: promo_cost / sales exceeds configured threshold.
@@ -245,6 +261,7 @@ queryable_rules:
     tags:
     - awaits_sales
   ad_spend_ratio_high:
+    condition_zh: "分组合计净销售额 > 0 且广告费合计 / 净销售额合计 > {ad_spend_ratio_high}"
     severity: P1
     level: aggregate
     description: ad_spend / sales exceeds configured threshold.
@@ -264,6 +281,7 @@ queryable_rules:
     - awaits_sales
     - awaits_ads
   ad_spend_without_sales:
+    condition_zh: "分组广告费合计 > 0 且净销售额合计 = 0；不等于广告归因无销售"
     severity: P1
     level: aggregate
     description: ad_spend > 0 while sales = 0.
@@ -285,6 +303,7 @@ queryable_rules:
     - awaits_sales
     - awaits_ads
   profit_rate_with_ads_ship_high:
+    condition_zh: "含广告与运费的分组利润率 > {profit_rate_with_ads_ship_high}；销售额为零时不计算利润率"
     severity: P1
     level: aggregate
     description: profit rate with Ads & Ship > 1.
@@ -346,3 +365,19 @@ rule_guards:
   ad_spend_without_sales:
     aggregate_only: true
     guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.
+patrol_policy:
+  version: '2026-11-02'
+  history_days: 14
+  stale_unfulfilled_days: 14
+  high_interval_days: 1
+  normal_interval_days: 3
+  high_rules:
+  - unit_cost_non_positive
+  - removed_hardware_abnormal
+  zero_cost_exceptions:
+  - match:
+      market_place: Ebay
+      store: PCOnline US_EB
+      sku: BONSAII_Renew-C237-B-Black_ER1
+    reason: 用户于 2026-11-02 确认该商品没有 PO 入库，业务上允许基础成本为零。
+    confirmed_on: '2026-11-02'

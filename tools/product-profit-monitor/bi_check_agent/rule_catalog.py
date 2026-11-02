@@ -56,3 +56,5 @@ def ensure_catalog_current():
     # A changed definition needs a restart, never a mixture of old/new metadata.
     if load_catalog() != RULES:
         raise RuntimeError('异常规则目录已更新，请重启工具后再查询，以保证解析与检查使用同一份规则。')
+    from bi_check_agent.patrol_policy import ensure_policy_current
+    ensure_policy_current()

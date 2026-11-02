@@ -108,7 +108,10 @@ def legacy_store(tmp_path, monkeypatch, *, build=None):
 @pytest.mark.parametrize('build', versioning.LEGACY_SOURCE_VERSIONS)
 def test_legacy_adoption_preserves_links_history_attempts_and_delivery_ids(tmp_path, monkeypatch, build):
     # This test exercises equivalent builds under the original business policy.
-    monkeypatch.setattr(versioning, 'POLICY_REVISION', 1)
+    # Simulate the old policy identity; changing only its revision no longer
+    # reconstructs it because applicability configuration was added in v3.
+    monkeypatch.setattr(versioning, 'diagnostic_policy_version', lambda: versioning.LEGACY_POLICY_VERSION)
+    monkeypatch.setattr(monitor, 'diagnostic_policy_version', lambda: versioning.LEGACY_POLICY_VERSION)
     assert versioning.diagnostic_policy_version() == versioning.LEGACY_POLICY_VERSION
     old, p, first, scope = legacy_store(tmp_path, monkeypatch, build=build)
     incident, queued = old.incidents()[0], old.outbox()
@@ -131,7 +134,10 @@ def test_legacy_adoption_preserves_links_history_attempts_and_delivery_ids(tmp_p
 
 
 def test_legacy_live_lease_and_failed_window_survive_upgrade(tmp_path, monkeypatch):
-    monkeypatch.setattr(versioning, 'POLICY_REVISION', 1)
+    # Simulate the old policy identity; changing only its revision no longer
+    # reconstructs it because applicability configuration was added in v3.
+    monkeypatch.setattr(versioning, 'diagnostic_policy_version', lambda: versioning.LEGACY_POLICY_VERSION)
+    monkeypatch.setattr(monitor, 'diagnostic_policy_version', lambda: versioning.LEGACY_POLICY_VERSION)
     old, p, run, _ = legacy_store(tmp_path, monkeypatch)
     with old._db() as db:
         db.execute("UPDATE runs SET status='running',lease_until=? WHERE id=?", (run['updated'] + 300, run['id']))

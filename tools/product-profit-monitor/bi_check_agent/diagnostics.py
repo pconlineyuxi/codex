@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from bi_check_agent import core
+from bi_check_agent import core, patrol_policy
 from bi_check_agent.rule_catalog import rules_with_tag
 
 ZONE = ZoneInfo('America/New_York')
@@ -43,14 +43,15 @@ SOURCE_SQL = """
 SELECT p.order_line_id,p.order_name AS order_id,p.market_place,p.store,p.sku,p.ir,p.date_order,
        p.product_cost_unit AS source_cost,p.price_subtotal-ABS(p.promotion) AS source_sales,
        sl.product_cost_unit AS raw_cost,so.create_date AS created_at,
-       so.state AS order_state,so.walmart_status,
-       outbound.last_scan_at, matches.line_matches,
+       so.state AS order_state,so.walmart_status,so.is_amazon_canceled,
+       so.amz_fulfullment_order_status,so.cwzy_ss_order_status,sl.qty_delivered,
+       outbound.last_scan_at,outbound.positive_scan_records, matches.line_matches,
        mv.result_matches,mv.result_cost,mv.result_sales
 FROM bi.ba_profit_order_line_info p
 JOIN public.sale_order_line sl ON sl.id=p.order_line_id
 JOIN public.sale_order so ON so.id=sl.order_id
 LEFT JOIN LATERAL (
-    SELECT MAX(h.scan_time) AS last_scan_at FROM public.order_outbound_history h
+    SELECT MAX(h.scan_time) AS last_scan_at, COUNT(*) AS positive_scan_records FROM public.order_outbound_history h
     WHERE h.order_id=sl.order_id AND h.product_id=sl.product_id AND h.scan_qty>0
 ) outbound ON TRUE
 LEFT JOIN LATERAL (
@@ -120,9 +121,6 @@ def assess(rule, row, source, now, *, matches=1):
     if source is None: return result
     required = ['order_line_id','result_matches','result_cost','result_sales','source_cost','source_sales','raw_cost','last_scan_at','line_matches','created_at','order_state','walmart_status']
     if any(k not in source for k in required): return result
-    if source['order_state']!='sale' or source['walmart_status']=='cancelled':
-        result.update(reason_code='business_scope_changed',conclusion='来源业务状态已变化，需要重新核对覆盖范围。')
-        return result
     if pd.isna(source['result_matches']) or source['result_matches'] != 1:
         result.update(reason_code='ambiguous_result',conclusion='结果视图缺少唯一对应记录，无法验证本次候选。')
         return result
@@ -132,6 +130,17 @@ def assess(rule, row, source, now, *, matches=1):
         return abs(float(a)-float(b))<=1e-8
     if not same(source[field],row.get(observed)):
         result.update(reason_code='snapshot_changed',conclusion='核查时结果已变化，请重新查询后判断。')
+        return result
+    applicability = patrol_policy.decision(rule,{**row,**source},now)
+    if applicability and (applicability['reason']!='stale_unfulfilled' or same(source['source_sales'],source['result_sales'])):
+        state = applicability['state']
+        result.update(assessment={'exempt':'business_observation','deferred':'waiting_data','unknown':'unknown'}[state],
+                      cause_status='not_applicable' if state=='exempt' else 'unresolved',
+                      reason_code=applicability['reason'],conclusion=patrol_policy.REASONS[applicability['reason']],
+                      applicability_state=state,missing_evidence=[] if state=='exempt' else ['实际平台履约状态'])
+        return result
+    if source['order_state']!='sale' or source['walmart_status']=='cancelled':
+        result.update(reason_code='business_scope_changed',conclusion='来源业务状态已变化，需要重新核对覆盖范围。')
         return result
     result['missing_evidence'] = ['对应补齐任务的完成记录及覆盖范围']
     result['facts'] = ['已唯一关联到订单行及本次结果记录。']

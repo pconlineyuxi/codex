@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import yaml
 
-POLICY_REVISION = 2
+POLICY_REVISION = 3
 # Verified equivalent builds, newest first. e903... differs only in display
 # grouping of aggregate findings (service.summarize_findings), not evaluation.
 # Older config-only fingerprints cannot prove SQL/formula identity and remain
@@ -28,6 +28,7 @@ def diagnostic_policy_version():
     filters = yaml.safe_load((root / 'config/filter_mapping.yaml').read_text())
     payload = {
         'revision': POLICY_REVISION,
+        'patrol_policy': rules.get('patrol_policy', {}),
         'rules': {key: {field: spec[field] for field in ('level', 'required_fields', 'tags')}
                   for key, spec in rules['queryable_rules'].items()},
         'thresholds': {key: value for key, value in rules['thresholds'].items()

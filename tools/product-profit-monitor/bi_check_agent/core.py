@@ -8,6 +8,7 @@ import pandas as pd
 import yaml
 
 from bi_check_agent.models import AnomalyQueryRequest
+from bi_check_agent.patrol_policy import allowed_zero_cost
 from bi_check_agent.rule_catalog import RULES
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -248,6 +249,8 @@ def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None, 
             "promotion_ratio_high": sales > 0 and promo / sales > thresholds["promotion_ratio_high"],
         }
         for rule in rules:
+            if allowed_zero_cost(rule, row):
+                continue
             if rule == "promotion_ratio_high" and str(row.get("market_place", "")).lower() not in {x.lower() for x in cfg.get("rule_guards", {}).get(rule, {}).get("skip_when_marketplace_not_in", [])}:
                 continue
             if checks.get(rule, False):
@@ -282,7 +285,7 @@ def detect_anomalies(df: pd.DataFrame, selected_rules: list[str] | None = None, 
     preferred = ORDER_LINE_DETAIL_COLUMNS + ["day", "month", "Sales", "Units", "Ads cost", "Tacos", "Shipping Fee", "Profit with Ads & Ship", "Profit rate with Ads & Ship", "anomaly_rules", "business_guard_notes"]
     if preserve_line_id:
         # Internal history reconciliation only; public callers keep the old projection.
-        preferred = preferred + ['order_line_id']
+        preferred = preferred + ['order_line_id','order_number']
     return result[[c for c in preferred if c in result.columns]]
 
 

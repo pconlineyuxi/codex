@@ -186,7 +186,7 @@ def evaluate_plan(plan,start,end):
             # original database precision, as the shared assessments do.
             obj=diagnostics.key_for(original)
             assessed=by_object.get((obj,rule))
-            if assessed and assessed['assessment'] in {'unknown','waiting_data'}:
+            if assessed and (assessed['assessment'] in {'unknown','waiting_data'} or assessed.get('applicability_state')=='exempt'):
                 continue
             fields={k:row.get(k) for k in ['order_id','sku','ir','market_place','store','day','date_order']}
             key=sha256(json.dumps([rule,fields],sort_keys=True).encode()).hexdigest()

@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 
-from bi_check_agent import core, db, service
+from bi_check_agent import core, db, service, patrol_policy
 from bi_check_agent.rule_catalog import rules_with_tag
 
 ZONE = ZoneInfo('America/New_York')
@@ -48,11 +48,11 @@ def fetch_cohorts(day, query_fn=None, targets=None):
             params[f'order_{i}'], params[f'product_{i}'] = order, product
         cost_filter = ' AND ('+' OR '.join(f'(order_id=:order_{i} AND product_id=:product_{i})' for i in range(len(pairs)))+')' if pairs else ' AND FALSE'
     sales = _bounded("""
-SELECT sl.id AS order_line_id, so.create_date AS created_at
+SELECT sl.id AS order_line_id, so.create_date AS created_at, so.name AS order_number
 FROM public.sale_order so
 JOIN public.sale_order_line sl ON sl.order_id=so.id
 WHERE so.create_date >= :start AND so.create_date < :end
-  AND so.state='sale' AND (so.walmart_status <> 'cancelled' OR so.walmart_status IS NULL)
+  AND so.state IN ('sale','cancel')
 """+sales_filter, params, query_fn)
     cost = _bounded("""
 WITH events AS (
@@ -62,17 +62,17 @@ WITH events AS (
 """+cost_filter+"""
     GROUP BY order_id, product_id
 )
-SELECT e.order_id, e.product_id, e.last_scan_at, so.create_date AS created_at,
+SELECT e.order_id, e.product_id, e.last_scan_at, so.create_date AS created_at, so.name AS order_number,
        COUNT(sl.id) AS line_matches, MIN(sl.id) AS order_line_id
 FROM events e
 JOIN public.sale_order so ON so.id=e.order_id
 LEFT JOIN public.sale_order_line sl ON sl.order_id=e.order_id AND sl.product_id=e.product_id
-WHERE so.state='sale' AND (so.walmart_status <> 'cancelled' OR so.walmart_status IS NULL)
-GROUP BY e.order_id,e.product_id,e.last_scan_at,so.create_date
+WHERE so.state IN ('sale','cancel')
+GROUP BY e.order_id,e.product_id,e.last_scan_at,so.create_date,so.name
 """, params, query_fn)
     unique_cost = cost[cost.line_matches == 1] if not cost.empty else cost
     ids = sorted({int(x) for x in list(sales.get('order_line_id', [])) + list(unique_cost.get('order_line_id', [])) if pd.notna(x)})
-    frames = []
+    frames, contexts = [], []
     total_rows = total_bytes = 0
     for offset in range(0, len(ids), 1000):
         batch = ids[offset:offset+1000]
@@ -93,14 +93,45 @@ WHERE p.order_line_id IN ({placeholders})
         if total_rows > int(os.getenv('MAX_QUERY_TOTAL_ROWS', '500000')) or total_bytes > int(os.getenv('MAX_QUERY_MEMORY_MB','256'))*1024*1024:
             raise RuntimeError('生命周期来源超过累计读取上限，不能完整判断')
         frames.append(frame)
+        contexts.append(_bounded(f"""
+WITH lines AS (
+SELECT sl.id AS order_line_id, so.name AS order_number, so.create_date AS created_at,
+       so.state AS order_state, so.walmart_status, so.is_amazon_canceled,
+       so.amz_fulfullment_order_status, so.cwzy_ss_order_status, sl.qty_delivered,
+       sl.order_id, sl.product_id
+FROM public.sale_order_line sl JOIN public.sale_order so ON so.id=sl.order_id
+WHERE sl.id IN ({placeholders})
+), scans AS (
+    SELECT h.order_id,h.product_id,COUNT(*) AS positive_scan_records
+    FROM public.order_outbound_history h
+    JOIN (SELECT DISTINCT order_id,product_id FROM lines) l
+      ON l.order_id=h.order_id AND l.product_id=h.product_id
+    WHERE h.scan_qty>0 GROUP BY h.order_id,h.product_id
+)
+SELECT l.order_line_id,l.order_number,l.created_at,l.order_state,l.walmart_status,l.is_amazon_canceled,
+       l.amz_fulfullment_order_status,l.cwzy_ss_order_status,l.qty_delivered,
+       COALESCE(s.positive_scan_records,0) AS positive_scan_records
+FROM lines l LEFT JOIN scans s ON s.order_id=l.order_id AND s.product_id=l.product_id
+""", bindings, query_fn))
     source = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame(columns=['order_line_id'])
+    context = {int(r['order_line_id']):r for f in contexts for r in f.to_dict('records')}
+    def enrich(frame):
+        if frame.empty: return frame
+        return pd.DataFrame([{**r,**context.get(int(r['order_line_id']),{})}
+                             if pd.notna(r.get('order_line_id')) else r for r in frame.to_dict('records')])
+    sales, cost, source = map(enrich,(sales,cost,source))
     return sales, cost, source
 
 
-def _evaluate(ids, source, rules, day, due):
+def _evaluate(ids, source, rules, day, due, events=None, now=None):
     counts = source.order_line_id.value_counts()
     ids = set(ids)
-    missing = sum(counts.get(i,0)==0 for i in ids)
+    event_rows = {int(r['order_line_id']):r for r in events.to_dict('records')} if events is not None and not events.empty else {}
+    source_rows = {int(r['order_line_id']):r for r in source.to_dict('records') if counts.get(r['order_line_id'],0)==1}
+    decisions = {(i,rule):patrol_policy.decision(rule,{**source_rows.get(i,{}),**event_rows.get(i,{})},now) if counts.get(i,0)<=1 else None
+                 for i in ids for rule in rules} if due else {}
+    exempt_ids = {i for i in ids if rules and all((decisions.get((i,r)) or {}).get('state')=='exempt' for r in rules)}
+    missing = sum(counts.get(i,0)==0 for i in ids-exempt_ids)
     duplicated = sum(counts.get(i,0)>1 for i in ids)
     usable_ids = {i for i in ids if counts.get(i,0)==1}
     rows = source[source.order_line_id.isin(usable_ids)].copy()
@@ -114,15 +145,33 @@ def _evaluate(ids, source, rules, day, due):
         rows = rows.iloc[0:0]
     rows['type'] = 'order'
     rows['date_order'] = str(day)  # Report day denotes this cohort's event date.
-    findings = core.detect_anomalies(rows, rules)
+    findings = core.detect_anomalies(rows, rules,preserve_line_id=True)
+    if not findings.empty:
+        findings['anomaly_rules'] = findings.apply(lambda r:', '.join(rule for rule in r['anomaly_rules'].split(', ')
+            if not decisions.get((int(r['order_line_id']),rule))),axis=1)
+        findings = findings[findings.anomaly_rules!='']
     groups = service.records(service.summarize_findings(findings, ['marketplace','store','sku','day']))
+    for group in groups:
+        matches = findings[(findings['anomaly_rules'].str.split(', ').map(lambda rs:group['anomaly_rules'] in rs))]
+        for key in ('market_place','store','sku'):
+            matches = matches[matches[key].fillna('') == (group.get(key) or '')]
+        group['order_numbers'] = patrol_policy.order_names(matches.to_dict('records'))
     totals = {rule:sum(int(g['规则命中样本数']) for g in groups if g['anomaly_rules']==rule) for rule in rules}
     overlap = sum({'missing_product_cost','unit_cost_non_positive'} <= set(v.split(', ')) for v in findings.get('anomaly_rules',[]))
+    applicability = []
+    for (i,rule),decision in decisions.items():
+        if not decision: continue
+        row = {**source_rows.get(i,{}),**event_rows.get(i,{})}
+        applicability.append({**{k:row.get(k) for k in ('market_place','store','sku','order_number')},'rule':rule,**decision})
+    unknowns = []
+    for rule in rules:
+        applicable = rows[~rows.order_line_id.isin([i for (i,r),d in decisions.items() if r==rule and d])] if not rows.empty else rows
+        unknowns.extend(service.rule_unknowns(applicable,[rule]))
     return {'candidate_lines':len(ids), 'eligible_lines':eligible, 'evaluated_lines':len(rows),
         'not_yet_due_lines':eligible if not due else 0, 'missing_source_lines':int(missing),
         'duplicate_source_lines':int(duplicated), 'excluded_fixed_filter_lines':excluded,
         'rule_counts':totals, 'overlapping_cost_rule_lines':int(overlap),
-        'groups':groups, 'unknown_inputs':service.rule_unknowns(rows,rules)}
+        'groups':groups, 'unknown_inputs':unknowns, 'applicability':applicability}
 
 
 def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
@@ -138,9 +187,9 @@ def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
     end_of_day_scan = utc_bounds(day)[1] - timedelta(microseconds=1)
     sales_rules = [r for r in SALES_RULES if r in selected_rules]
     cost_rules = [r for r in COST_RULES if r in selected_rules]
-    sales_result = _evaluate(sales.get('order_line_id',[]),source,sales_rules,day,current>=sales_due)
+    sales_result = _evaluate(sales.get('order_line_id',[]),source,sales_rules,day,current>=sales_due,sales,current)
     unique_cost = cost[cost.line_matches==1] if not cost.empty else cost
-    cost_result = _evaluate(unique_cost.get('order_line_id',[]),source,cost_rules,day,reached_cost_deadline(end_of_day_scan,current))
+    cost_result = _evaluate(unique_cost.get('order_line_id',[]),source,cost_rules,day,reached_cost_deadline(end_of_day_scan,current),unique_cost,current)
     cost_result.update({'candidate_order_products':len(cost),
         'unmatched_order_products':int((cost.line_matches==0).sum()) if not cost.empty else 0,
         'ambiguous_order_products':int((cost.line_matches>1).sum()) if not cost.empty else 0,
@@ -148,7 +197,7 @@ def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
     if tracking_sink is not None:
         from bi_check_agent.patrol_tracking import collect_snapshot
         tracking_sink(collect_snapshot(day, current, sales, cost, source, sales_rules, cost_rules))
-    partial = any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
+    partial = any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] or any(a['state']=='unknown' for a in r['applicability']) for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
     status = 'empty_unverified' if sales.empty and cost.empty else ('partial_assessment' if partial else 'reviewed')
     return {'status':status, 'job_completion_verified':False,
         'basis':'expected_deadline', 'event_day':str(day), 'source_timezone':'UTC', 'business_timezone':str(ZONE),
@@ -193,9 +242,15 @@ def markdown(result):
     groups = result['sales']['groups'] + result['cost']['groups']
     if groups:
         lines += ['',f"时限复核疑点分组（展示 {min(len(groups),15)}/{len(groups)} 组）：",'',
-            '| 平台 | 店铺 | SKU | 规则 | 订单行数 |','| --- | --- | --- | --- | ---: |']
+            '| 平台 | 店铺 | SKU | 订单号 | 规则 | 订单行数 |','| --- | --- | --- | --- | --- | ---: |']
         def cell(value):return str(value if value is not None else '未提供').replace('|','\\|').replace('\n',' ')
         for row in sorted(groups,key=lambda r:-r['规则命中样本数'])[:15]:
-            lines.append('| '+' | '.join(cell(v) for v in [row['market_place'],row['store'],row['sku'],service.RULE_LABELS[row['anomaly_rules']],row['规则命中样本数']])+' |')
+            lines.append('| '+' | '.join(cell(v) for v in [row['market_place'],row['store'],row['sku'],', '.join(row.get('order_numbers',[])) or '未取得',service.RULE_LABELS[row['anomaly_rules']],row['规则命中样本数']])+' |')
+    for name in ('sales','cost'):
+        decisions = result[name].get('applicability',[])
+        if decisions:
+            lines += ['', '业务适用性判断（不视为金额已修复）：', '']
+            for a in decisions:
+                lines.append(f"- {a.get('order_number') or '订单号未取得'} / {a.get('sku') or 'SKU 未取得'}：{service.RULE_LABELS[a['rule']]}，{patrol_policy.REASONS[a['reason']]}。")
     lines += ['',f"两条成本规则同时命中 {cost['overlapping_cost_rule_lines']} 条订单行，不可相加。这些仍是预期时限下的疑点，未核实任务成功记录，不能判定写入失败。", '']
     return lines
