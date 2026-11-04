@@ -5,7 +5,7 @@ import os
 
 import pandas as pd
 
-from bi_check_agent import core, db, service, patrol_policy
+from bi_check_agent import core, db, service, patrol_policy, outbound_evidence, cost_provenance
 from bi_check_agent.rule_catalog import rules_with_tag
 
 ZONE = ZoneInfo('America/New_York')
@@ -14,7 +14,7 @@ COST_RULES = list(rules_with_tag('lifecycle_cost'))
 NOTE = ('按预期补齐时限复核，不代表补跑任务已成功。销售额按创建当日应补齐；成本按出库后次日纽约时间 09:00 复核。'
         'scan_time 的 UTC 口径已由用户确认；sale_order.create_date 按 UTC 解释，与本次时间核查一致，仍属待业务确认的假设。'
         '金额来自物化结果视图的直接订单来源 bi.ba_profit_order_line_info，以订单行 ID 关联；与辅助观察不是同一快照。'
-        '多订单行对应同一出库商品或来源不唯一时不强行分配。本节覆盖指定创建日/出库日；历史疑点复查另列，不将历史未命中解释为正式恢复。')
+        '同一商品多订单行时通过 SN 库存移动或完整数量核对；证据不足或金额来源不唯一时不强行分配。本节覆盖指定创建日/出库日；历史疑点复查另列，不将历史未命中解释为正式恢复。')
 
 
 def utc_bounds(day):
@@ -70,7 +70,8 @@ LEFT JOIN public.sale_order_line sl ON sl.order_id=e.order_id AND sl.product_id=
 WHERE so.state IN ('sale','cancel')
 GROUP BY e.order_id,e.product_id,e.last_scan_at,so.create_date,so.name
 """, params, query_fn)
-    unique_cost = cost[cost.line_matches == 1] if not cost.empty else cost
+    cost = outbound_evidence.enrich(cost, start, end, query_fn)
+    unique_cost = outbound_evidence.resolved_rows(cost)
     ids = sorted({int(x) for x in list(sales.get('order_line_id', [])) + list(unique_cost.get('order_line_id', [])) if pd.notna(x)})
     frames, contexts = [], []
     total_rows = total_bytes = 0
@@ -98,8 +99,9 @@ WITH lines AS (
 SELECT sl.id AS order_line_id, so.name AS order_number, so.create_date AS created_at,
        so.state AS order_state, so.walmart_status, so.is_amazon_canceled,
        so.amz_fulfullment_order_status, so.cwzy_ss_order_status, sl.qty_delivered,
-       sl.order_id, sl.product_id
+       sl.order_id, sl.product_id, pp.default_code AS actual_ir
 FROM public.sale_order_line sl JOIN public.sale_order so ON so.id=sl.order_id
+JOIN public.product_product pp ON pp.id=sl.product_id
 WHERE sl.id IN ({placeholders})
 ), scans AS (
     SELECT h.order_id,h.product_id,COUNT(*) AS positive_scan_records
@@ -108,7 +110,7 @@ WHERE sl.id IN ({placeholders})
       ON l.order_id=h.order_id AND l.product_id=h.product_id
     WHERE h.scan_qty>0 GROUP BY h.order_id,h.product_id
 )
-SELECT l.order_line_id,l.order_number,l.created_at,l.order_state,l.walmart_status,l.is_amazon_canceled,
+SELECT l.order_line_id,l.actual_ir,l.order_number,l.created_at,l.order_state,l.walmart_status,l.is_amazon_canceled,
        l.amz_fulfullment_order_status,l.cwzy_ss_order_status,l.qty_delivered,
        COALESCE(s.positive_scan_records,0) AS positive_scan_records
 FROM lines l LEFT JOIN scans s ON s.order_id=l.order_id AND s.product_id=l.product_id
@@ -120,6 +122,8 @@ FROM lines l LEFT JOIN scans s ON s.order_id=l.order_id AND s.product_id=l.produ
         return pd.DataFrame([{**r,**context.get(int(r['order_line_id']),{})}
                              if pd.notna(r.get('order_line_id')) else r for r in frame.to_dict('records')])
     sales, cost, source = map(enrich,(sales,cost,source))
+    source = cost_provenance.enrich(source, query_fn,
+        eligible_ids={int(i) for i in unique_cost.get('order_line_id',[]) if pd.notna(i)})
     return sales, cost, source
 
 
@@ -188,22 +192,30 @@ def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
     sales_rules = [r for r in SALES_RULES if r in selected_rules]
     cost_rules = [r for r in COST_RULES if r in selected_rules]
     sales_result = _evaluate(sales.get('order_line_id',[]),source,sales_rules,day,current>=sales_due,sales,current)
-    unique_cost = cost[cost.line_matches==1] if not cost.empty else cost
+    unique_cost = outbound_evidence.resolved_rows(cost)
+    pairs = cost.drop_duplicates(['order_id','product_id']) if not cost.empty else cost
+    resolved_pairs = unique_cost.drop_duplicates(['order_id','product_id']) if not unique_cost.empty else unique_cost
     cost_result = _evaluate(unique_cost.get('order_line_id',[]),source,cost_rules,day,reached_cost_deadline(end_of_day_scan,current),unique_cost,current)
-    cost_result.update({'candidate_order_products':len(cost),
-        'unmatched_order_products':int((cost.line_matches==0).sum()) if not cost.empty else 0,
-        'ambiguous_order_products':int((cost.line_matches>1).sum()) if not cost.empty else 0,
-        'created_before_outbound_day':int((pd.to_datetime(unique_cost.created_at)<utc_bounds(day)[0]).sum()) if not unique_cost.empty else 0})
+    cost_result.update({'candidate_order_products':len(pairs),
+        'evidence_resolved_order_products':int((resolved_pairs.line_matches>1).sum()) if not resolved_pairs.empty else 0,
+        'association_read_failures':sum(r.get('association_basis')=='evidence_read_failed' for r in pairs.to_dict('records')),
+        'unmatched_order_products':int((pairs.line_matches==0).sum()) if not cost.empty else 0,
+        'ambiguous_order_products':sum(r['line_matches']>1 and not outbound_evidence.resolved(r) for r in pairs.to_dict('records')) if not cost.empty else 0,
+        'created_before_outbound_day':int((pd.to_datetime(resolved_pairs.created_at)<utc_bounds(day)[0]).sum()) if not unique_cost.empty else 0})
     if tracking_sink is not None:
         from bi_check_agent.patrol_tracking import collect_snapshot
         tracking_sink(collect_snapshot(day, current, sales, cost, source, sales_rules, cost_rules))
-    partial = any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] or any(a['state']=='unknown' for a in r['applicability']) for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
+    provenance = cost_provenance.public_reviews(source)
+    provenance_incomplete = any(r['status'] != 'reviewed' for r in provenance)
+    partial = provenance_incomplete or any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] or any(a['state']=='unknown' for a in r['applicability']) for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
     status = 'empty_unverified' if sales.empty and cost.empty else ('partial_assessment' if partial else 'reviewed')
     return {'status':status, 'job_completion_verified':False,
         'basis':'expected_deadline', 'event_day':str(day), 'source_timezone':'UTC', 'business_timezone':str(ZONE),
         'sales_deadline':sales_due.isoformat(), 'cost_deadline':cost_due.isoformat(),
         'sources':['public.sale_order','public.sale_order_line','public.order_outbound_history','bi.ba_profit_order_line_info'],
-        'sales':sales_result,'cost':cost_result,'note':NOTE}
+        'sales':sales_result,'cost':cost_result,'cost_provenance':provenance,
+        'cost_provenance_status':'incomplete' if provenance_incomplete else ('reviewed' if provenance else 'not_needed'),
+        'note':NOTE}
 
 
 def signature_payload(result):
@@ -230,7 +242,7 @@ def markdown(result):
         r=result[name]
         lines.append(f"| {label} | {r.get('candidate_order_products',r['candidate_lines'])} | {r['evaluated_lines']} | {r['missing_source_lines']}/{r['duplicate_source_lines']} |")
     cost=result['cost']
-    lines += ['',f"出库商品中，{cost['unmatched_order_products']} 组未匹配订单行，{cost['ambiguous_order_products']} 组对应多条订单行，均未强行分配；唯一匹配中 {cost['created_before_outbound_day']} 组早于本次出库日创建。",'',
+    lines += ['',f"出库商品中，{cost['unmatched_order_products']} 组未匹配订单行，{cost['ambiguous_order_products']} 组仍无法核实多订单行归属；另有 {cost.get('evidence_resolved_order_products',0)} 组通过库存移动证据核实。可核实匹配中 {cost['created_before_outbound_day']} 组早于本次出库日创建。",'',
         '| 规则 | 超过预期补齐时点仍命中（待核查） |','| --- | ---: |']
     for name in ['sales','cost']:
         for rule,count in result[name]['rule_counts'].items():
@@ -252,5 +264,13 @@ def markdown(result):
             lines += ['', '业务适用性判断（不视为金额已修复）：', '']
             for a in decisions:
                 lines.append(f"- {a.get('order_number') or '订单号未取得'} / {a.get('sku') or 'SKU 未取得'}：{service.RULE_LABELS[a['rule']]}，{patrol_policy.REASONS[a['reason']]}。")
+    reviews = result.get('cost_provenance',[])
+    if reviews:
+        lines += ['', '### 零基础成本来源复核', '', '| 订单号 | SKU／实际商品 | 自动核查结果 | 采购／入库依据 |', '| --- | --- | --- | --- |']
+        for r in reviews:
+            evidence = f"PO 行数 {r.get('po_line_count','未取得')}；采购价 {r.get('purchase_price','未取得')}；入库单 {', '.join(r.get('receipt_numbers',[])) or '未取得'}"
+            values = [r.get('order_number') or '未取得',f"{r.get('sku') or ''}／{r.get('actual_ir') or ''}",r['summary'],evidence]
+            lines.append('| '+' | '.join(str(v).replace('|','\\|').replace('\n',' ') for v in values)+' |')
+        lines += ['', '未查到 PO 不等于业务允许零成本；自动赠品例外仅在当前完整来源核验成立时适用，后续混入付费或未知来源会重新保留核查。']
     lines += ['',f"两条成本规则同时命中 {cost['overlapping_cost_rule_lines']} 条订单行，不可相加。这些仍是预期时限下的疑点，未核实任务成功记录，不能判定写入失败。", '']
     return lines

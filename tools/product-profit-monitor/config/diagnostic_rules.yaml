@@ -366,7 +366,10 @@ rule_guards:
     aggregate_only: true
     guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.
 patrol_policy:
-  version: '2026-11-02'
+  version: '2026-11-04'
+  # Exact original receipt comments; absence of PO alone is never an exception.
+  gift_receipt_notes:
+    - 雷神赠品0成本入库
   history_days: 14
   stale_unfulfilled_days: 14
   high_interval_days: 1

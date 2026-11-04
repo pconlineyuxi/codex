@@ -101,7 +101,7 @@ def test_legacy_zero_exception_is_auditable_and_stops_daily_reminder(tmp_path):
     state={'schema_version':1,'cases':{},'imported_reports':[],'health':{}}
     case=dict(event_day=str(DAY),cohort='cost',identity_kind='legacy_group',rule='unit_cost_non_positive',
               market_place='Ebay',store='PCOnline US_EB',sku='BONSAII_Renew-C237-B-Black_ER1',
-              state='open',reason='legacy_group_hit',count=2)
+              state='open',reason='legacy_group_hit',count=1)
     state['cases'][tracking.identity(case)]=tracking._new_case(case,(NOW-timedelta(days=10)).isoformat())
     cost=pd.DataFrame([{**bonsaii(), 'order_id':99,'product_id':88,'line_matches':1}])
     snap=tracking.collect_snapshot(DAY,NOW,pd.DataFrame(),cost,pd.DataFrame([bonsaii()]),[],['unit_cost_non_positive'])

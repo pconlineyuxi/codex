@@ -17,6 +17,7 @@ POLICY = CONFIG['patrol_policy']
 ZONE = ZoneInfo('America/New_York')
 REASONS = {
     'allowed_zero_cost':'已确认业务允许零成本',
+    'verified_gift_receipt':'已核实本次零成本商品为无 PO 赠品入库来源，不视为金额修复',
     'confirmed_cancelled':'已取消且没有履约证据，不适用金额补齐检查',
     'stale_unfulfilled':'长期未履约待核对，仅状态变化再提醒',
     'cancellation_with_fulfillment':'取消标记与履约证据冲突，需核对实际履约状态',
@@ -44,6 +45,9 @@ def allowed_zero_cost(rule, row):
         return False
     if rule == 'unit_cost_non_positive' and base+hardware-removed != 0:
         return False
+    evidence = row.get('cost_review')
+    if isinstance(evidence, dict) and evidence.get('status') == 'reviewed' and evidence.get('gift_verified') is True:
+        return True
     return any(all(str(row.get(k,'')) == str(v) for k,v in item['match'].items())
                for item in POLICY['zero_cost_exceptions'])
 
@@ -51,7 +55,9 @@ def allowed_zero_cost(rule, row):
 def decision(rule, row, now=None):
     """Return an explicit applicability state, or None to evaluate normally."""
     if allowed_zero_cost(rule,row):
-        return {'state':'exempt','reason':'allowed_zero_cost'}
+        evidence = row.get('cost_review')
+        reason = 'verified_gift_receipt' if isinstance(evidence, dict) and evidence.get('gift_verified') is True else 'allowed_zero_cost'
+        return {'state':'exempt','reason':reason}
     tags = CONFIG['queryable_rules'].get(rule,{}).get('tags',[])
     if not set(tags) & {'lifecycle_sales','lifecycle_cost'}:
         return None

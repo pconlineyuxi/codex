@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from bi_check_agent import core, patrol_policy
+from bi_check_agent import core, patrol_policy, cost_provenance, outbound_evidence
 from bi_check_agent.rule_catalog import rules_with_tag
 
 ZONE = ZoneInfo('America/New_York')
@@ -42,7 +42,8 @@ def cost_due(scan, now):
 SOURCE_SQL = """
 SELECT p.order_line_id,p.order_name AS order_id,p.market_place,p.store,p.sku,p.ir,p.date_order,
        p.product_cost_unit AS source_cost,p.price_subtotal-ABS(p.promotion) AS source_sales,
-       sl.product_cost_unit AS raw_cost,so.create_date AS created_at,
+       p.hardware_cost AS source_hardware_cost,p.removed_hardware AS source_removed_hardware,
+       sl.product_cost_unit AS raw_cost,sl.order_id AS raw_order_id,sl.product_id,so.create_date AS created_at,
        so.state AS order_state,so.walmart_status,so.is_amazon_canceled,
        so.amz_fulfullment_order_status,so.cwzy_ss_order_status,sl.qty_delivered,
        outbound.last_scan_at,outbound.positive_scan_records, matches.line_matches,
@@ -100,6 +101,9 @@ def fetch_source(rows, request, query_fn):
             raise ValueError('原因核查超过累计上限')
         frame=frame.copy()
         frame['_source_kind']=kind
+        if kind=='cost':
+            frame=outbound_evidence.enrich_source(frame, query_fn)
+            frame=cost_provenance.enrich(frame, query_fn)
         frames.append(frame)
     return pd.concat(frames,ignore_index=True) if frames else pd.DataFrame()
 
@@ -119,6 +123,7 @@ def assess(rule, row, source, now, *, matches=1):
         result.update(reason_code='ambiguous_match',conclusion='来源或结果不唯一，无法把异常归属到具体订单行。')
         return result
     if source is None: return result
+    if isinstance(source.get('cost_review'),dict): result['cost_review']=source['cost_review']
     required = ['order_line_id','result_matches','result_cost','result_sales','source_cost','source_sales','raw_cost','last_scan_at','line_matches','created_at','order_state','walmart_status']
     if any(k not in source for k in required): return result
     if pd.isna(source['result_matches']) or source['result_matches'] != 1:
@@ -130,6 +135,10 @@ def assess(rule, row, source, now, *, matches=1):
         return abs(float(a)-float(b))<=1e-8
     if not same(source[field],row.get(observed)):
         result.update(reason_code='snapshot_changed',conclusion='核查时结果已变化，请重新查询后判断。')
+        return result
+    if rule in COST_RULES and any(k in source and not same(source[k],row.get(v))
+            for k,v in [('source_hardware_cost','hardware_cost'),('source_removed_hardware','removed_hardware')]):
+        result.update(reason_code='snapshot_changed',conclusion='核查时装拆件成本已变化，请重新查询后判断。')
         return result
     applicability = patrol_policy.decision(rule,{**row,**source},now)
     if applicability and (applicability['reason']!='stale_unfulfilled' or same(source['source_sales'],source['result_sales'])):
@@ -149,7 +158,7 @@ def assess(rule, row, source, now, *, matches=1):
                        'bi.ba_order_line_info' if source.get('_source_kind')=='cost' else 'bi.ba_profit_order_line_info',
                        'bi.ba_mv_profit_order_line_and_ad_info']
     if rule in COST_RULES:
-        if pd.isna(source['line_matches']) or source['line_matches']!=1:
+        if not outbound_evidence.resolved(source):
             result.update(reason_code='ambiguous_outbound',conclusion='同一订单商品对应多条订单行，无法确认具体出库归属。')
             return result
         due = cost_due(source['last_scan_at'],now)
@@ -221,10 +230,14 @@ def build(rows, anomalies, request, mode, query_fn, now=None):
             group = tuple(None if pd.isna(row.get(k)) else str(row.get(k)) for k in ['market_place','store','sku','day'])
             identity = (group,rule,item['assessment'],item['reason_code'])
             measurements=item.pop('measurements',{})
+            cost_review=item.pop('cost_review',None)
             if identity not in grouped:
                 grouped[identity] = {**dict(zip(['market_place','store','sku','day'],group)),**item,'rule':rule,'count':0,'object_keys':[],'measurement_ranges':{}}
             grouped[identity]['count']+=1
             grouped[identity]['object_keys'].append(obj)
+            if cost_review:
+                reviews=grouped[identity].setdefault('cost_reviews',[])
+                if cost_review not in reviews: reviews.append(cost_review)
             for field,value in measurements.items():
                 span=grouped[identity]['measurement_ranges'].setdefault(field,{'min':None,'max':None,'missing_count':0})
                 if value is None:span['missing_count']+=1
