@@ -1,9 +1,7 @@
 """Explain zero base cost from purchase/receipt evidence, without rewriting costs.
 
-No PO is a finding, never an exemption by itself. The automatic gift exception
-is deliberately narrow: untracked, non-distribution goods whose *entire current
-external inventory history* has only explicit zero-cost gift inflows. Mixed or
-later paid procurement removes that proof; no SKU is permanently allowlisted.
+A completed lookup for one applicable purchase product can establish that zero
+base cost is expected. Gift classification is a separate finding.
 """
 from collections import defaultdict
 from html import unescape
@@ -14,11 +12,9 @@ from bi_check_agent.patrol_policy import POLICY, number, present
 
 LABELS = {
     'verified_gift_receipt': '无 PO、采购价为零，已核实零成本赠品入库及出库数量',
-    'no_po_zero_purchase_price': '未查到适用 PO，商品采购价为零；缺少可确认的赠品来源',
+    'verified_no_po_zero_cost': '已核实无适用 PO，原始基础成本为零',
     'purchase_cost_available': '查到非零采购价格来源，需要核对成本计算或带入链路',
     'po_requires_review': '存在采购记录，不能按无 PO 零成本排除',
-    'mixed_or_unverified_receipts': '库存来源混杂或入库证据不足，不能确认本次出库属于赠品',
-    'unsupported_cost_branch': '当前为 SN、分销或整机关联成本分支，不能用无 PO 推断成本应为零',
     'source_missing_or_duplicate': '成本来源缺失或不唯一，保留疑点',
     'evidence_read_failed': '采购／入库证据读取未完成，保留疑点',
 }
@@ -28,11 +24,22 @@ def plain_note(value):
     return re.sub(r'\s+', '', unescape(re.sub(r'<[^>]*>', '', str(value or ''))))
 
 
+def can_check_gift(context):
+    return (context.get('tracking_method') == 'upc' and context.get('tracking') == 'none'
+            and context.get('is_distribution') is False and not present(context.get('main_upc'))
+            and number(context.get('purchase_price')) == 0 and number(context.get('fallback_purchase_price')) == 0
+            and number(context.get('fallback_matches')) == 1)
+
+
+def incomplete(review):
+    return review['status'] != 'reviewed' or review.get('receipt_check_status') == 'failed'
+
+
 def judge(context, purchases, moves, messages):
     """Pure evidence decision. Private row identifiers never enter the result."""
     prices = [number(r.get('price_unit')) for r in purchases]
     report = {
-        'status': 'reviewed', 'code': 'no_po_zero_purchase_price', 'gift_verified': False,
+        'status': 'reviewed', 'gift_verified': False,
         'actual_ir': str(context['actual_ir']) if present(context.get('actual_ir')) else None,
         'po_line_count': len(purchases),
         'po_numbers': sorted({str(r['po_number']) for r in purchases if present(r.get('po_number'))}),
@@ -46,21 +53,16 @@ def judge(context, purchases, moves, messages):
                                    and m.get('dest_usage') == 'internal' and present(m.get('receipt'))}),
         'gift_receipts': [],
     }
-    if any(p is not None and p != 0 for p in prices + [report['purchase_price'], report['fallback_purchase_price']]):
-        report['code'] = 'purchase_cost_available'
-    elif purchases:
-        report['code'] = 'po_requires_review'
-    elif (context.get('tracking_method') != 'upc' or context.get('tracking') != 'none'
-          or context.get('is_distribution') is not False or present(context.get('main_upc'))):
-        report['code'] = 'unsupported_cost_branch'
-    elif (report['purchase_price'] == 0 and report['fallback_purchase_price'] == 0
-          and number(context.get('fallback_matches')) == 1
-          and number(context.get('raw_cost')) == 0):
-        verified, receipts = gift_inventory(context, moves, messages)
-        if verified:
-            report.update(code='verified_gift_receipt', gift_verified=True, gift_receipts=receipts)
-        elif moves:
-            report['code'] = 'mixed_or_unverified_receipts'
+    if purchases:
+        price_sources = prices + [report['purchase_price'], report['fallback_purchase_price']]
+        report['code'] = ('purchase_cost_available' if any(p is not None and p != 0 for p in price_sources)
+                          else 'po_requires_review')
+    elif number(context.get('raw_cost')) == 0:
+        report['code'] = 'verified_no_po_zero_cost'
+        if moves and can_check_gift(context):
+            verified, receipts = gift_inventory(context, moves, messages)
+            if verified:
+                report.update(code='verified_gift_receipt', gift_verified=True, gift_receipts=receipts)
     else:
         report.update(status='incomplete', code='source_missing_or_duplicate')
     report['summary'] = LABELS[report['code']]
@@ -154,25 +156,37 @@ WHERE sl.id IN ({placeholders})
             values = ','.join(f'(:l{i},:p{i},CAST(:u{i} AS text))' for i in range(len(valid)))
             purchases = reader.read(f"""
 WITH targets(line,product,main_upc) AS (VALUES {values})
-SELECT t.line AS order_line_id,pol.id,po.name AS po_number,po.state AS po_state,
-       pol.price_unit,pol.qty_received,rc.name AS currency
-FROM targets t JOIN public.product_product pp
+SELECT t.line AS order_line_id,pp.id AS scope_product_id,pol.id AS po_line_id,
+       po.name AS po_number,po.state AS po_state,pol.price_unit,pol.qty_received,rc.name AS currency
+FROM targets t LEFT JOIN public.product_product pp
   ON (t.main_upc IS NULL AND pp.id=t.product) OR (t.main_upc IS NOT NULL AND pp.barcode=t.main_upc)
-JOIN public.purchase_order_line pol ON pol.product_id=pp.id
-JOIN public.purchase_order po ON po.id=pol.order_id
+LEFT JOIN public.purchase_order_line pol ON pol.product_id=pp.id
+LEFT JOIN public.purchase_order po ON po.id=pol.order_id
 LEFT JOIN public.res_currency rc ON rc.id=pol.currency_id
 """, params)
+            by_target = defaultdict(list)
+            for match in purchases:
+                by_target[int(match['order_line_id'])].append(match)
             eligible = []
             for r in valid:
-                po = [p for p in purchases if p['order_line_id']==r['order_line_id']]
-                preliminary = judge(r, po, [], [])
-                results[int(r['order_line_id'])] = preliminary
-                if preliminary['code'] == 'no_po_zero_purchase_price':
+                line = int(r['order_line_id'])
+                matches = by_target[line]
+                product_ids = {m['scope_product_id'] for m in matches if present(m.get('scope_product_id'))}
+                if len(product_ids) != 1:
+                    continue
+                po = [m for m in matches if present(m['po_line_id'])]
+                results[line] = judge(r, po, [], [])
+                if results[line]['code'] == 'verified_no_po_zero_cost' and can_check_gift(r):
                     eligible.append(r)
-            # Existing PO/positive purchase price/SN branches remain visible,
-            # but do not trigger an unbounded inventory-history investigation.
-            if not eligible:
-                continue
+        except Exception:
+            # Driver text can contain credentials.
+            for line in batch:
+                results[line] = {'status':'failed','code':'evidence_read_failed','gift_verified':False,
+                                 'summary':LABELS['evidence_read_failed']}
+            continue
+        if not eligible:
+            continue
+        try:
             products = sorted({int(r['product_id']) for r in eligible})
             pparams, pvalues = bindings(products, 'product')
             moves = reader.read(f"""
@@ -196,14 +210,12 @@ SELECT res_id AS picking_id,body FROM public.mail_message
 WHERE model='stock.picking' AND res_id IN ({mvalues}) AND message_type='comment'
 """, mparams)
             for r in eligible:
-                results[int(r['order_line_id'])] = judge(r,
-                    [p for p in purchases if p['order_line_id']==r['order_line_id']],
+                results[int(r['order_line_id'])] = judge(r, [],
                     [m for m in moves if m['product_id']==r['product_id']], messages)
         except Exception:
-            # Never expose driver text (which can contain connection secrets).
-            for line in batch:
-                results[line] = {'status':'failed','code':'evidence_read_failed','gift_verified':False,
-                                 'summary':LABELS['evidence_read_failed']}
+            # Optional receipts do not invalidate a completed PO lookup.
+            for r in eligible:
+                results[int(r['order_line_id'])]['receipt_check_status'] = 'failed'
     result = frame.copy()
     if results:
         result['cost_review'] = [results.get(int(r['order_line_id'])) if present(r.get('order_line_id')) else None

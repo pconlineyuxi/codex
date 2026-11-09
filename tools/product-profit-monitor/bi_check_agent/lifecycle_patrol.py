@@ -206,7 +206,7 @@ def review(day, selected_rules, now=None, fetch_fn=None, tracking_sink=None):
         from bi_check_agent.patrol_tracking import collect_snapshot
         tracking_sink(collect_snapshot(day, current, sales, cost, source, sales_rules, cost_rules))
     provenance = cost_provenance.public_reviews(source)
-    provenance_incomplete = any(r['status'] != 'reviewed' for r in provenance)
+    provenance_incomplete = any(cost_provenance.incomplete(r) for r in provenance)
     partial = provenance_incomplete or any(r['missing_source_lines'] or r['duplicate_source_lines'] or r['unknown_inputs'] or r['not_yet_due_lines'] or any(a['state']=='unknown' for a in r['applicability']) for r in [sales_result,cost_result]) or cost_result['unmatched_order_products'] or cost_result['ambiguous_order_products']
     status = 'empty_unverified' if sales.empty and cost.empty else ('partial_assessment' if partial else 'reviewed')
     return {'status':status, 'job_completion_verified':False,

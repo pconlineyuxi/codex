@@ -16,6 +16,7 @@ CONFIG = yaml.safe_load((ROOT/'config/diagnostic_rules.yaml').read_text())
 POLICY = CONFIG['patrol_policy']
 ZONE = ZoneInfo('America/New_York')
 REASONS = {
+    'verified_no_po_zero_cost':'已核实无适用 PO 且基础成本为零，按业务口径排除',
     'allowed_zero_cost':'已确认业务允许零成本',
     'verified_gift_receipt':'已核实本次零成本商品为无 PO 赠品入库来源，不视为金额修复',
     'confirmed_cancelled':'已取消且没有履约证据，不适用金额补齐检查',
@@ -36,27 +37,34 @@ def present(value):
     return value is not None and not pd.isna(value) and str(value).strip() != ''
 
 
-def allowed_zero_cost(rule, row):
+def zero_cost_reason(rule, row):
     if rule not in {'missing_product_cost','unit_cost_non_positive'}:
-        return False
+        return None
     base, hardware, removed = [number(row.get(k)) for k in ('product_cost_unit','hardware_cost','removed_hardware')]
-    # Do not hide NULL, negative components, or excessive removal behind an exception.
     if base != 0 or hardware is None or removed is None or hardware < 0 or removed < 0 or removed > base+hardware:
-        return False
+        return None
     if rule == 'unit_cost_non_positive' and base+hardware-removed != 0:
-        return False
+        return None
     evidence = row.get('cost_review')
-    if isinstance(evidence, dict) and evidence.get('status') == 'reviewed' and evidence.get('gift_verified') is True:
-        return True
-    return any(all(str(row.get(k,'')) == str(v) for k,v in item['match'].items())
-               for item in POLICY['zero_cost_exceptions'])
+    if isinstance(evidence, dict) and evidence.get('status') == 'reviewed':
+        if evidence.get('gift_verified') is True:
+            return 'verified_gift_receipt'
+        if (POLICY['allow_verified_no_po_zero_cost'] and evidence.get('code') == 'verified_no_po_zero_cost'
+                and evidence.get('po_line_count') == 0):
+            return 'verified_no_po_zero_cost'
+    if any(all(str(row.get(k,'')) == str(v) for k,v in item['match'].items()) for item in POLICY['zero_cost_exceptions']):
+        return 'allowed_zero_cost'
+    return None
+
+
+def allowed_zero_cost(rule, row):
+    return zero_cost_reason(rule, row) is not None
 
 
 def decision(rule, row, now=None):
     """Return an explicit applicability state, or None to evaluate normally."""
-    if allowed_zero_cost(rule,row):
-        evidence = row.get('cost_review')
-        reason = 'verified_gift_receipt' if isinstance(evidence, dict) and evidence.get('gift_verified') is True else 'allowed_zero_cost'
+    reason = zero_cost_reason(rule, row)
+    if reason:
         return {'state':'exempt','reason':reason}
     tags = CONFIG['queryable_rules'].get(rule,{}).get('tags',[])
     if not set(tags) & {'lifecycle_sales','lifecycle_cost'}:

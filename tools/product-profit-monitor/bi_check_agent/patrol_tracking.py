@@ -14,7 +14,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pandas as pd
-from bi_check_agent import core, lifecycle_patrol, service, patrol_policy, outbound_evidence
+from bi_check_agent import cost_provenance, core, lifecycle_patrol, service, patrol_policy, outbound_evidence
 from bi_check_agent.rule_catalog import RULES
 
 ZONE = ZoneInfo('America/New_York')
@@ -120,7 +120,7 @@ def collect_snapshot(day, now, sales, cost, source, sales_rules, cost_rules):
                         if not finite: reason = 'unknown_input'; break
                 state = 'unknown' if reason else ('open' if rule in hits.get(line,set()) else 'clear')
                 observations.append({**base,'rule':rule,'state':state,'reason':reason or state,'count':1})
-    incomplete = any(isinstance(r.get('cost_review'),dict) and r['cost_review']['status'] != 'reviewed' for r in source.to_dict('records'))
+    incomplete = any(isinstance(r.get('cost_review'),dict) and cost_provenance.incomplete(r['cost_review']) for r in source.to_dict('records'))
     return {'event_day':str(day),'checked_at':now.isoformat(),'observations':observations,
             'cost_provenance_incomplete':incomplete}
 

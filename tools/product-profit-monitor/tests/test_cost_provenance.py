@@ -29,11 +29,12 @@ def row():
                 positive_scan_records=1,amz_fulfullment_order_status=None,cwzy_ss_order_status=None)
 
 
-def test_no_po_alone_never_exempts_and_confirmed_gift_does():
+def test_verified_no_po_exempts_without_receipt_and_gift_evidence_stays_distinct():
     no_po=p.judge(context(),[],[],[])
-    assert no_po['code']=='no_po_zero_purchase_price' and not no_po['gift_verified']
+    assert no_po['code']=='verified_no_po_zero_cost' and not no_po['gift_verified']
     r=row();r['cost_review']=no_po
-    assert patrol_policy.decision('unit_cost_non_positive',r) is None
+    for rule in ('missing_product_cost','unit_cost_non_positive'):
+        assert patrol_policy.decision(rule,r)==dict(state='exempt',reason='verified_no_po_zero_cost')
     gift=p.judge(context(),[],moves(),messages())
     assert gift['gift_verified'] and gift['gift_receipts']==['IN/GIFT']
     r['cost_review']=gift
@@ -77,11 +78,11 @@ def test_future_paid_po_reopens_and_sku_is_not_allowlisted():
     assert not result['gift_verified'] and result['code']=='purchase_cost_available'
     assert result['po_numbers']==['PO/NEW']
     c['purchase_price']=10
-    assert p.judge(c,[],moves(),messages())['code']=='purchase_cost_available'
+    assert p.judge(c,[],moves(),messages())['code']=='verified_no_po_zero_cost'
     c=context();c['tracking_method']='sn'
-    assert p.judge(c,[],moves(),messages())['code']=='unsupported_cost_branch'
+    assert p.judge(c,[],moves(),messages())['code']=='verified_no_po_zero_cost'
     c=context();c['fallback_matches']=0
-    assert p.judge(c,[],moves(),messages())['status']=='incomplete'
+    assert p.judge(c,[],moves(),messages())['code']=='verified_no_po_zero_cost'
 
 
 def test_failed_or_truncated_queries_are_visible_and_do_not_exempt(monkeypatch):
@@ -94,20 +95,21 @@ def test_failed_or_truncated_queries_are_visible_and_do_not_exempt(monkeypatch):
     assert result['status']=='failed'
 
 
-def test_lifecycle_tracking_web_agree_and_failed_history_is_visible(tmp_path):
-    r=row();r['cost_review']=p.judge(context(),[],moves(),messages())
+@pytest.mark.parametrize('receipt_moves,reason', [([], 'verified_no_po_zero_cost'), (moves(), 'verified_gift_receipt')])
+def test_lifecycle_tracking_web_agree_and_failed_history_is_visible(tmp_path,receipt_moves,reason):
+    r=row();r['cost_review']=p.judge(context(),[],receipt_moves,messages())
     source=pd.DataFrame([r]);cost=pd.DataFrame([{**r,'order_id':99,'product_id':77,'line_matches':1}])
     now=datetime(2026,11,4,15,tzinfo=timezone.utc);day=date(2026,10,28);snap=[]
     report=lifecycle_patrol.review(day,['missing_product_cost','unit_cost_non_positive'],now,
         lambda _:(pd.DataFrame(),cost,source),snap.append)
     assert report['cost']['overlapping_cost_rule_lines']==0
     assert report['cost']['rule_counts']['unit_cost_non_positive']==0
-    assert report['cost_provenance'][0]['gift_verified']
+    assert report['cost_provenance'][0]['code']==reason
     assert len([x for x in snap[0]['observations'] if x['state']=='exempt'])==2
     assert all(x not in json.dumps(report) for x in ['order_line_id','product_id','order_id'])
     src={**r,'result_matches':1,'result_cost':0.,'result_sales':29.99,'source_cost':0.,'source_sales':29.99,
          'raw_cost':0.,'last_scan_at':'2026-10-28 13:00','line_matches':1}
-    assert diagnostics.assess('unit_cost_non_positive',r,src,now)['reason_code']=='verified_gift_receipt'
+    assert diagnostics.assess('unit_cost_non_positive',r,src,now)['reason_code']==reason
     r['cost_review']={'status':'failed','code':'evidence_read_failed','gift_verified':False,'summary':'未完成'}
     snap=patrol_tracking.collect_snapshot(day,now,pd.DataFrame(),cost.drop(columns='cost_review'),pd.DataFrame([r]),[],['unit_cost_non_positive'])
     state=dict(schema_version=1,cases={},imported_reports=[],health={})
@@ -143,13 +145,14 @@ def test_legacy_missing_rows_do_not_reuse_old_gift_proof():
     assert result['state']=='unknown' and 'cost_review' not in result
 
 
-def test_gift_case_changes_once_stops_reminders_and_paid_source_reopens():
+@pytest.mark.parametrize('receipt_moves,reason', [([], 'verified_no_po_zero_cost'), (moves(), 'verified_gift_receipt')])
+def test_zero_cost_case_changes_once_stops_reminders_and_paid_source_reopens(receipt_moves,reason):
     from datetime import timedelta
     now=datetime(2026,11,4,15,tzinfo=timezone.utc)
     initial=dict(state='open',reason='open',rule='unit_cost_non_positive')
     case=patrol_tracking._new_case(initial,(now-timedelta(days=6)).isoformat())
-    proof=p.judge(context(),[],moves(),messages())
-    exempt=dict(state='exempt',reason='verified_gift_receipt',cost_review=proof)
+    proof=p.judge(context(),[],receipt_moves,messages())
+    exempt=dict(state='exempt',reason=reason,cost_review=proof)
     assert patrol_tracking._update(case,exempt,now)=='changed'
     assert patrol_tracking._update(case,exempt,now) is None
     assert not patrol_tracking._due(case,now+timedelta(days=10))
@@ -190,3 +193,40 @@ def test_legacy_cleared_association_does_not_publish_all_healthy_orders():
     tracked=patrol_tracking._new_case(case,now.isoformat())
     patrol_tracking._update(tracked,result,now)
     assert tracked['order_numbers']==[]
+
+
+@pytest.mark.parametrize('raw_cost', [None, -1, 10])
+def test_missing_or_nonzero_raw_cost_never_uses_no_po_exception(raw_cost):
+    evidence=p.judge({**context(),'raw_cost':raw_cost},[],[],[])
+    assert evidence['status']=='incomplete'
+    assert patrol_policy.decision('missing_product_cost',{**row(),'cost_review':evidence}) is None
+
+
+@pytest.mark.parametrize('scope,po_line,expected', [
+    ([], None, 'source_missing_or_duplicate'),
+    ([None], None, 'source_missing_or_duplicate'),
+    ([20,21], None, 'source_missing_or_duplicate'),
+    ([20], 50, 'po_requires_review'),
+    ([20], None, 'verified_no_po_zero_cost'),
+])
+def test_no_po_requires_one_resolved_purchase_product(scope,po_line,expected):
+    def read(sql, params):
+        if 'FROM public.sale_order_line sl' in sql:
+            return pd.DataFrame([{**context(),'product_id':10,'function_product_id':10,'main_upc':'PARENT'}])
+        assert 'targets' in sql and params['u0']=='PARENT'
+        return pd.DataFrame([dict(order_line_id=10,scope_product_id=i,po_line_id=po_line) for i in scope])
+    evidence=p.enrich(pd.DataFrame([row()]),read).iloc[0].cost_review
+    assert evidence['code']==expected
+    assert patrol_policy.allowed_zero_cost('missing_product_cost',{**row(),'cost_review':evidence})==(expected=='verified_no_po_zero_cost')
+
+
+def test_optional_receipt_failure_preserves_completed_po_lookup():
+    def read(sql, params):
+        if 'FROM public.sale_order_line sl' in sql:
+            return pd.DataFrame([{**context(),'product_id':10,'function_product_id':10}])
+        if 'targets' in sql:
+            return pd.DataFrame([dict(order_line_id=10,scope_product_id=10,po_line_id=None)])
+        raise RuntimeError('receipt read unavailable')
+    evidence=p.enrich(pd.DataFrame([row()]),read).iloc[0].cost_review
+    assert p.incomplete(evidence) and not evidence['gift_verified']
+    assert patrol_policy.decision('unit_cost_non_positive',{**row(),'cost_review':evidence})['reason']=='verified_no_po_zero_cost'
