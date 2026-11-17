@@ -230,3 +230,26 @@ def test_optional_receipt_failure_preserves_completed_po_lookup():
     evidence=p.enrich(pd.DataFrame([row()]),read).iloc[0].cost_review
     assert p.incomplete(evidence) and not evidence['gift_verified']
     assert patrol_policy.decision('unit_cost_non_positive',{**row(),'cost_review':evidence})['reason']=='verified_no_po_zero_cost'
+
+
+@pytest.mark.parametrize('base,raw', [(None,None),(-178.47,-178.47),(-1.,0.)])
+@pytest.mark.parametrize('has_po', [False, True])
+def test_historical_underlying_cost_and_po_are_checked(base, raw, has_po):
+    item=dict(row(),product_cost_unit=base)
+    def read(sql, params):
+        if 'FROM public.sale_order_line sl' in sql:
+            return pd.DataFrame([{**context(),'raw_cost':raw,'product_id':20,'function_product_id':20,'main_upc':'PARENT'}])
+        assert 'targets' in sql and params['u0']=='PARENT'
+        po=dict(po_line_id=22,po_number='PO/TEST',price_unit=186.24,currency='USD') if has_po else dict(po_line_id=None)
+        return pd.DataFrame([dict(order_line_id=10,scope_product_id=32,**po)])
+    frame=p.enrich(pd.DataFrame([item]),read,eligible_ids={10})
+    review=frame.iloc[0].cost_review
+    assert review['raw_base_cost']==raw and review['source_base_cost']==base
+    assert review['code']==('purchase_cost_available' if has_po else 'no_po_cost_still_suspect')
+    assert ('PO/TEST' in review['summary'])==has_po
+    assert ('186.24 USD' in review['summary'])==has_po
+    assert patrol_policy.zero_cost_reason('missing_product_cost',frame.iloc[0]) is None
+    case=dict(cohort='cost',rule='missing_product_cost',state='open',count=1,market_place='Target',store='TA',sku='GIFT-SKU')
+    obs={**case,'order_numbers':['SO-GIFT'],'actual_ir':'GIFT','cost_review':review}
+    legacy=patrol_tracking._legacy_observation(case,{'observations':[obs]})
+    assert legacy['order_reference_basis']=='current_group' and legacy['cost_review']==review

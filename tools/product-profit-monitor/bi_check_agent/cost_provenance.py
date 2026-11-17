@@ -1,4 +1,4 @@
-"""Explain zero base cost from purchase/receipt evidence, without rewriting costs.
+"""Explain missing or nonpositive base costs using purchase and receipt evidence.
 
 A completed lookup for one applicable purchase product can establish that zero
 base cost is expected. Gift classification is a separate finding.
@@ -17,6 +17,7 @@ LABELS = {
     'po_requires_review': '存在采购记录，不能按无 PO 零成本排除',
     'source_missing_or_duplicate': '成本来源缺失或不唯一，保留疑点',
     'evidence_read_failed': '采购／入库证据读取未完成，保留疑点',
+    'no_po_cost_still_suspect': '已查明无适用 PO，基础成本为空、负数或两处不一致，继续核查',
 }
 
 
@@ -35,6 +36,10 @@ def incomplete(review):
     return review['status'] != 'reviewed' or review.get('receipt_check_status') == 'failed'
 
 
+def display_cost(value):
+    return '空' if value is None else format(value, '.2f')
+
+
 def judge(context, purchases, moves, messages):
     """Pure evidence decision. Private row identifiers never enter the result."""
     prices = [number(r.get('price_unit')) for r in purchases]
@@ -45,6 +50,7 @@ def judge(context, purchases, moves, messages):
         'po_numbers': sorted({str(r['po_number']) for r in purchases if present(r.get('po_number'))}),
         'po_scope': 'main_upc' if present(context.get('main_upc')) else 'product',
         'purchase_price': number(context.get('purchase_price')),
+        'raw_base_cost': number(context.get('raw_cost')),
         'fallback_purchase_price': number(context.get('fallback_purchase_price')),
         'po_price_min': min((p for p in prices if p is not None), default=None),
         'po_price_max': max((p for p in prices if p is not None), default=None),
@@ -57,12 +63,14 @@ def judge(context, purchases, moves, messages):
         price_sources = prices + [report['purchase_price'], report['fallback_purchase_price']]
         report['code'] = ('purchase_cost_available' if any(p is not None and p != 0 for p in price_sources)
                           else 'po_requires_review')
-    elif number(context.get('raw_cost')) == 0:
+    elif number(context.get('raw_cost')) == 0 and number(context.get('source_base_cost', 0)) == 0:
         report['code'] = 'verified_no_po_zero_cost'
         if moves and can_check_gift(context):
             verified, receipts = gift_inventory(context, moves, messages)
             if verified:
                 report.update(code='verified_gift_receipt', gift_verified=True, gift_receipts=receipts)
+    elif 'source_base_cost' in context:
+        report['code'] = 'no_po_cost_still_suspect'
     else:
         report.update(status='incomplete', code='source_missing_or_duplicate')
     report['summary'] = LABELS[report['code']]
@@ -118,9 +126,15 @@ def enrich(frame, query_fn=None, eligible_ids=None):
     field = 'product_cost_unit' if 'product_cost_unit' in frame else 'source_cost'
     if field not in frame:
         return frame
-    ids = sorted({int(r['order_line_id']) for r in frame.to_dict('records')
-                  if number(r.get(field)) == 0 and present(r.get('order_line_id'))
-                  and (eligible_ids is None or int(r['order_line_id']) in eligible_ids)})
+    costs = {}
+    for row in frame.to_dict('records'):
+        if not present(row.get('order_line_id')):
+            continue
+        line = int(row['order_line_id'])
+        base = number(row[field])
+        if (base is None or base <= 0) and (eligible_ids is None or line in eligible_ids):
+            costs[line] = base
+    ids = sorted(costs)
     results, reader = {}, Reader(query_fn)
     for offset in range(0, len(ids), 100):
         batch = ids[offset:offset+100]
@@ -170,6 +184,7 @@ LEFT JOIN public.res_currency rc ON rc.id=pol.currency_id
             eligible = []
             for r in valid:
                 line = int(r['order_line_id'])
+                r['source_base_cost'] = costs[line]
                 matches = by_target[line]
                 product_ids = {m['scope_product_id'] for m in matches if present(m.get('scope_product_id'))}
                 if len(product_ids) != 1:
@@ -218,6 +233,17 @@ WHERE model='stock.picking' AND res_id IN ({mvalues}) AND message_type='comment'
                 results[int(r['order_line_id'])]['receipt_check_status'] = 'failed'
     result = frame.copy()
     if results:
+        for line, review in results.items():
+            review['source_base_cost'] = costs[line]
+            if review['status'] == 'reviewed':
+                po = '、'.join(review['po_numbers']) or '无'
+                review['summary'] += (f"。原始／巡检基础成本 {display_cost(review['raw_base_cost'])}／{display_cost(costs[line])}，"
+                                      f"适用 PO {po}")
+                if review['po_price_min'] is not None and len(review['po_currencies']) == 1:
+                    prices = display_cost(review['po_price_min'])
+                    if review['po_price_min'] != review['po_price_max']:
+                        prices += '–' + display_cost(review['po_price_max'])
+                    review['summary'] += f"，PO 单价 {prices} {review['po_currencies'][0]}"
         result['cost_review'] = [results.get(int(r['order_line_id'])) if present(r.get('order_line_id')) else None
                                  for r in result.to_dict('records')]
     return result
