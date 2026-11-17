@@ -35,7 +35,7 @@ queryable_rules:
     - lifecycle_sales
     - monitor_data_issue
   zero_sales_with_units:
-    condition_zh: "净销售额 = 0 且数量 ≠ 0；确认取消及长期未履约按适用性策略处理"
+    condition_zh: "净销售额 = 0 且数量 ≠ 0；结合已确认的样品单、取消及长期未履约情况复核"
     severity: P0
     level: line
     description: Sales = 0 but Units is not 0.
@@ -366,7 +366,8 @@ rule_guards:
     aggregate_only: true
     guard_note: Ad spend is SKU/date-level, not order-line-level. Explain only at aggregation level.
 patrol_policy:
-  version: '2026-11-09'
+  version: '2026-11-17'
+  confirmed_marketing_samples_file: .runtime/confirmed-marketing-sample-orders.txt
   allow_verified_no_po_zero_cost: true
   # Receipt comments are used only to classify a verified gift.
   gift_receipt_notes:

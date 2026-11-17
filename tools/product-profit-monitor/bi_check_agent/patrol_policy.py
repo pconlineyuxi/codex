@@ -15,7 +15,20 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = yaml.safe_load((ROOT/'config/diagnostic_rules.yaml').read_text())
 POLICY = CONFIG['patrol_policy']
 ZONE = ZoneInfo('America/New_York')
+
+
+def confirmed_sample_orders():
+    path = ROOT / POLICY['confirmed_marketing_samples_file']
+    try:
+        return frozenset(line.strip() for line in path.read_text(encoding='utf-8').splitlines()
+                         if line.strip() and not line.lstrip().startswith('#'))
+    except FileNotFoundError:
+        return frozenset()
+
+
+SAMPLE_ORDERS = confirmed_sample_orders()
 REASONS = {
+    'confirmed_marketing_sample':'业务已确认是市场部寄给达人的样品，零销售额符合预期',
     'verified_no_po_zero_cost':'已核实无适用 PO 且基础成本为零，按业务口径排除',
     'allowed_zero_cost':'已确认业务允许零成本',
     'verified_gift_receipt':'已核实本次零成本商品为无 PO 赠品入库来源，不视为金额修复',
@@ -85,6 +98,9 @@ def decision(rule, row, now=None):
         return {'state':'exempt','reason':'confirmed_cancelled'}
     if rule != 'zero_sales_with_units' or number(row.get('sales')) != 0 or not (number(row.get('units')) or 0) > 0:
         return None
+    if (str(row.get('market_place')) == 'PCOnline' and str(row.get('store')) == 'PCOnline'
+            and row.get('order_number') in SAMPLE_ORDERS):
+        return {'state':'exempt','reason':'confirmed_marketing_sample'}
     if not unfulfilled or not present(row.get('created_at')):
         return None
     created = pd.Timestamp(row['created_at'])
@@ -104,5 +120,5 @@ def order_names(rows):
 
 def ensure_policy_current():
     current = yaml.safe_load((ROOT/'config/diagnostic_rules.yaml').read_text())
-    if current.get('patrol_policy') != POLICY:
+    if current.get('patrol_policy') != POLICY or confirmed_sample_orders() != SAMPLE_ORDERS:
         raise RuntimeError('巡检业务策略已更新，请重启工具后再查询，避免旧例外与新规则混用。')

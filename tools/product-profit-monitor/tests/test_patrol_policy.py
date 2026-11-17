@@ -131,3 +131,39 @@ def test_rulebook_is_complete_current_and_cli_needs_no_database(monkeypatch,caps
     output=capsys.readouterr().out
     for rule in policy.CONFIG['queryable_rules']: assert f'`{rule}`' in output
     assert (policy.ROOT/'docs/patrol-rules.md').read_text()==render()
+
+
+def test_sample_exemption_is_order_scoped_and_suppresses_only_repeat_sales_alerts(monkeypatch):
+    monkeypatch.setattr(policy, 'SAMPLE_ORDERS', {'SAMPLE-A'})
+    sample = changed(order_number='SAMPLE-A', market_place='PCOnline', store='PCOnline', sku='', qty_delivered=1)
+    other = {**sample, 'order_number':'SAMPLE-B', 'order_line_id':11}
+    frame = pd.DataFrame([sample, other])
+    captured = []
+    result = lifecycle.review(DAY, ['zero_sales_with_units'], NOW,
+                              lambda _:(frame, pd.DataFrame(), frame), captured.append)
+    assert result['sales']['groups'][0]['order_numbers'] == ['SAMPLE-B']
+    obs = next(r for r in captured[0]['observations'] if r['order_numbers'] == ['SAMPLE-A'])
+    assert (obs['state'], obs['reason']) == ('exempt', 'confirmed_marketing_sample')
+    case = tracking._new_case({**obs,'state':'open','reason':'open'},NOW.isoformat())
+    assert tracking._update(case, obs, NOW) == 'changed'
+    assert not tracking._due(case, NOW+timedelta(days=4))
+    for rule in ('missing_product_cost','unit_cost_non_positive','negative_units','negative_sales'):
+        assert policy.decision(rule, sample, NOW) is None
+    for overrides in ({'market_place':'Amazon'}, {'store':'Other'}, {'sales':-1}, {'units':-1},
+                      {'sales':None}, {'order_number':None}):
+        assert policy.decision('zero_sales_with_units', {**sample,**overrides}, NOW) is None
+    duplicate = pd.concat([frame, frame.head(1)], ignore_index=True)
+    captured.clear()
+    lifecycle.review(DAY, ['zero_sales_with_units'], NOW,
+                     lambda _:(frame, pd.DataFrame(), duplicate), captured.append)
+    obs = next(r for r in captured[0]['observations'] if r['order_numbers'] == ['SAMPLE-A'])
+    assert obs['state'] == 'unknown' and obs['reason'] == 'duplicate_source'
+
+
+def test_sample_confirmation_reader(tmp_path, monkeypatch):
+    monkeypatch.setattr(policy, 'ROOT', tmp_path)
+    assert not policy.confirmed_sample_orders()
+    path = tmp_path / policy.POLICY['confirmed_marketing_samples_file']
+    path.parent.mkdir()
+    path.write_text('# 业务确认\n\nSAMPLE-A\n SAMPLE-B \nSAMPLE-A\n')
+    assert policy.confirmed_sample_orders() == {'SAMPLE-A','SAMPLE-B'}

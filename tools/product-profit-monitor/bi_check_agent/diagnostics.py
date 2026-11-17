@@ -43,7 +43,7 @@ SOURCE_SQL = """
 SELECT p.order_line_id,p.order_name AS order_id,p.market_place,p.store,p.sku,p.ir,p.date_order,
        p.product_cost_unit AS source_cost,p.price_subtotal-ABS(p.promotion) AS source_sales,
        p.hardware_cost AS source_hardware_cost,p.removed_hardware AS source_removed_hardware,
-       sl.product_cost_unit AS raw_cost,sl.order_id AS raw_order_id,sl.product_id,so.create_date AS created_at,
+       sl.product_cost_unit AS raw_cost,sl.order_id AS raw_order_id,sl.product_id,so.create_date AS created_at,so.name AS order_number,
        so.state AS order_state,so.walmart_status,so.is_amazon_canceled,
        so.amz_fulfullment_order_status,so.cwzy_ss_order_status,sl.qty_delivered,
        outbound.last_scan_at,outbound.positive_scan_records, matches.line_matches,
@@ -141,7 +141,7 @@ def assess(rule, row, source, now, *, matches=1):
         result.update(reason_code='snapshot_changed',conclusion='核查时装拆件成本已变化，请重新查询后判断。')
         return result
     applicability = patrol_policy.decision(rule,{**row,**source},now)
-    if applicability and (applicability['reason']!='stale_unfulfilled' or same(source['source_sales'],source['result_sales'])):
+    if applicability and (applicability['reason'] not in {'stale_unfulfilled','confirmed_marketing_sample'} or same(source['source_sales'],source['result_sales'])):
         state = applicability['state']
         result.update(assessment={'exempt':'business_observation','deferred':'waiting_data','unknown':'unknown'}[state],
                       cause_status='not_applicable' if state=='exempt' else 'unresolved',
